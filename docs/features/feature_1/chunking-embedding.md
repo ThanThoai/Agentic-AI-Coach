@@ -874,7 +874,202 @@ uv run python -m app.rag.ingest --file knowledge-base/08-progressive-overload.md
 
 ---
 
-## 8. Full data flow diagram
+## 8. Resource & cost estimates
+
+All figures are for the current corpus: **20 docs, ~104 chunks, ~230 tokens/chunk avg.**
+
+---
+
+### 8.1 One-time ingestion cost
+
+#### Dense embedding — API call to OpenAI
+
+```
+Chunks         : 104
+Tokens/chunk   : ~230  (text + contextual prefix)
+Total tokens   : 104 × 230 = 23,920
+
+Model          : text-embedding-3-small  @ $0.00002 / 1K tokens
+Cost           : 23,920 / 1,000 × $0.00002 = $0.000478  ≈ $0.0005
+```
+
+#### Sparse embedding — local BM25
+
+```
+Chunks         : 104
+Time/chunk     : ~0.5 ms  (tokenisation + TF-IDF scoring, single CPU core)
+Total time     : ~52 ms
+
+API calls      : 0
+Cost           : $0.00
+```
+
+#### Metadata extraction
+
+```
+Rule-based (all 20 docs match existing rules):
+  API calls    : 0
+  Cost         : $0.00
+
+LLM fallback (only triggered for unlisted docs):
+  Model        : claude-haiku-4-5  @ $0.80 / 1M input tokens
+  Tokens/doc   : ~200 (prompt + doc excerpt)
+  Cost/doc     : 200 / 1,000,000 × $0.80 = $0.00016
+  Cost (0 fallbacks for current corpus): $0.00
+```
+
+#### Ingestion summary
+
+| Step | Time | API cost |
+|------|------|----------|
+| Parse + metadata (rule-based) | ~200 ms | $0.00 |
+| Chunking + edge-case handling | ~50 ms | $0.00 |
+| Dense embed (3 batches of 50) | ~800 ms | **$0.0005** |
+| Sparse BM25 (local) | ~52 ms | **$0.00** |
+| Qdrant upsert (104 points) | ~200 ms | $0.00 |
+| **Total** | **~1.3 s** | **~$0.0005** |
+
+Re-ingesting a single updated document costs a fraction of this:
+`1 doc × ~5 chunks × $0.00002/1K × 230 tokens ≈ $0.000023`.
+
+---
+
+### 8.2 Per-query cost
+
+Each `POST /api/v1/rag/query` call involves:
+
+#### Embedding the question
+
+```
+Tokens         : ~20  (average question length)
+
+Dense embed    : 20 / 1,000 × $0.00002  = $0.0000004  (negligible)
+Sparse BM25    : local CPU ~0.3 ms      = $0.00
+```
+
+#### LLM generation (claude-sonnet-4-6)
+
+Prompt breakdown:
+
+```
+System prompt                  : ~250 tokens  ← eligible for Anthropic prompt cache
+Context (5 chunks × 230 tok)  : ~1,150 tokens
+Question                       : ~20 tokens
+──────────────────────────────────────────────
+Total input                    : ~1,420 tokens
+Expected output                : ~150 tokens
+```
+
+Pricing (claude-sonnet-4-6):
+
+| Token type | Price | Amount | Cost |
+|---|---|---|---|
+| Input (uncached) | $3.00 / 1M | 1,420 tok | $0.00426 |
+| Output | $15.00 / 1M | 150 tok | $0.00225 |
+| **First call (cold)** | | | **$0.00651** |
+
+After the system prompt is cached (Anthropic 5-min TTL):
+
+| Token type | Price | Amount | Cost |
+|---|---|---|---|
+| Cache write | $3.75 / 1M | 250 tok (1st time) | $0.00094 |
+| Cache read | $0.30 / 1M | 250 tok | $0.000075 |
+| Input (uncached) | $3.00 / 1M | 1,170 tok | $0.00351 |
+| Output | $15.00 / 1M | 150 tok | $0.00225 |
+| **Cached call** | | | **~$0.00584** |
+
+Cache saves **~$0.00067 per call** (~10%). Benefit grows when system prompt is larger
+(e.g. when more knowledge context is pinned as a persistent prefix).
+
+#### Per-query cost by model
+
+| Model | Cold call | Cached call | Cache savings |
+|---|---|---|---|
+| claude-sonnet-4-6 | $0.00651 | $0.00584 | ~10% |
+| claude-haiku-4-5 | $0.00143 | $0.00125 | ~12% |
+| gpt-4o | $0.00640 | n/a (no caching) | — |
+| gpt-4o-mini | $0.00038 | n/a | — |
+
+> Haiku is **~5× cheaper** than Sonnet for this use case. Use Haiku for high-volume
+> or non-critical queries; Sonnet for nuanced coaching advice where quality matters.
+
+---
+
+### 8.3 Monthly cost projections
+
+Assumes cached LLM calls (Anthropic), mixed Sonnet/Haiku deployment.
+
+#### Sonnet 4.6 only
+
+| Daily queries | Monthly queries | LLM cost/month | Embed cost/month | **Total/month** |
+|---|---|---|---|---|
+| 100 | 3,000 | $17.52 | ~$0.00 | **~$17.52** |
+| 500 | 15,000 | $87.60 | ~$0.00 | **~$87.60** |
+| 2,000 | 60,000 | $350.40 | ~$0.00 | **~$350** |
+| 10,000 | 300,000 | $1,752 | ~$0.01 | **~$1,752** |
+
+#### Haiku 4.5 only (cost-optimised)
+
+| Daily queries | Monthly queries | LLM cost/month | **Total/month** |
+|---|---|---|---|
+| 100 | 3,000 | $3.75 | **~$3.75** |
+| 500 | 15,000 | $18.75 | **~$18.75** |
+| 2,000 | 60,000 | $75.00 | **~$75** |
+| 10,000 | 300,000 | $375.00 | **~$375** |
+
+Query embedding cost ($0.0000004/query) is negligible at all scales — omitted above.
+
+---
+
+### 8.4 Storage footprint
+
+#### Qdrant vector storage (104 chunks)
+
+| Vector type | Size/chunk | Total (104 chunks) |
+|---|---|---|
+| Dense (1536 float32) | 6,144 bytes | ~0.60 MB |
+| Sparse (avg 80 non-zero terms × 8 bytes) | ~640 bytes | ~0.065 MB |
+| Payload (JSON, ~500 bytes avg) | ~500 bytes | ~0.050 MB |
+| **Total** | | **~0.72 MB** |
+
+This fits entirely in Qdrant Cloud's **free tier** (1 GB). Even at 10× corpus size
+(200 docs, ~1,040 chunks), total storage would be ~7 MB.
+
+#### RAM at runtime
+
+| Component | RAM | When loaded |
+|---|---|---|
+| fastembed `Qdrant/bm25` model | ~80–120 MB | FastAPI startup, stays resident |
+| Qdrant client (async) | ~5–10 MB | Per connection |
+| Dense embedding (API-side) | 0 MB | Stateless API call |
+| **Total overhead** | **~90–130 MB** | Added to base FastAPI memory |
+
+This is the **only meaningful resource cost** of adding sparse BM25 — 90-130 MB RAM
+for the vocabulary model. Acceptable for a standard 512 MB+ container.
+
+---
+
+### 8.5 Dense-only vs hybrid — cost comparison
+
+| Dimension | Dense only | Dense + Sparse (hybrid) |
+|---|---|---|
+| Ingestion API cost | ~$0.0005 | ~$0.0005 (unchanged) |
+| Ingestion time | ~1.0 s | ~1.3 s (+52 ms sparse) |
+| Per-query API cost | $0.00584 (cached) | $0.00584 (unchanged) |
+| Per-query latency | ~300 ms | ~305 ms (+5 ms sparse + RRF) |
+| RAM overhead | ~0 MB extra | **+90–130 MB** (BM25 model) |
+| Qdrant storage | ~0.65 MB | **~0.72 MB** (+10%) |
+| Recall on abbreviation queries | Weak | **Strong** |
+| Recall on semantic queries | Strong | **Strong** |
+| Infrastructure complexity | Low | Medium |
+
+**Bottom line:** Adding BM25 hybrid costs **+$0.00 per query**, **+52 ms per ingest**,
+and **+90-130 MB RAM**. The only real cost is the RAM. The retrieval quality gain
+on exact-term queries (RPE, 1RM, 5x5, Romanian Deadlift) is significant.
+
+---
+
+## 9. Full data flow diagram
 
 ```
  knowledge-base/08-progressive-overload.md
