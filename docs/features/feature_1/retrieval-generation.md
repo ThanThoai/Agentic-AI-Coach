@@ -637,37 +637,38 @@ def apply_diversity_filter(
 **File:** `backend/app/rag/retriever.py`
 
 Context assembly is the bridge between raw retrieval results and the LLM prompt.
-It decides **what** information enters the context window, **how** it is ordered
-and formatted, and **which chain strategy** to use when the candidate pool is larger
-than the token budget allows.
+It decides **what** information enters the context window, **how** chunks are
+grouped and ordered, and **which formatting strategy** structures them so the LLM
+can reason most effectively over the retrieved material.
+
+Three strategies, each matched to a query type:
+
+| Query type | Strategy | Core principle |
+|------------|----------|---------------|
+| `COMPARISON` | **Compare** | Group chunks by "side" — all evidence for A, then all for B, then shared background |
+| `COMPLEX` | **Chain** | Order chunks by causal step — problem → analysis → solution, one section per sub-query |
+| `SIMPLE` | **Aggregate** | Flat relevance-ordered list; LLM synthesises without structural guidance |
 
 ```
-SearchResult list (from 3e)
+results_per_query: list[list[SearchResult]]   (from Section 3e, pre-RRF)
         │
         ▼
-  4a. Retrieve payload metadata → build rich chunk objects
+  4a. _build_assembled_chunks()
+      → AssembledChunk list, each tagged with sub_query_indices
         │
         ▼
-  4b. Order chunks (strategy-aware)
+  4b. select_chain_strategy(query_type)
+     ┌────────────────────────────────────────┐
+     │ COMPARISON → compare                   │
+     │ COMPLEX    → chain                     │
+     │ SIMPLE     → aggregate                 │
+     └────────────────────────────────────────┘
         │
         ▼
-  4c. Measure total token cost
+  4c. Format context block (with per-section token guard)
         │
-     fits?
-    ┌───┴────────────────────────┐
-    │ Yes                        │ No
-    ▼                            ▼
-  Stuffing                 select overflow strategy
-  (default)                ┌────────────────────────┐
-                           │ COMPLEX / COMPARISON    │
-                           │  → Map-Reduce           │
-                           │ SIMPLE                  │
-                           │  → Refine               │
-                           └────────────────────────┘
-        │                        │
-        └──────────┬─────────────┘
-                   ▼
-           formatted context string
+        ▼
+   context string → Section 5 (Generation)
 ```
 
 ---
@@ -675,118 +676,82 @@ SearchResult list (from 3e)
 ### 4a. Retrieval result structure
 
 Each `SearchResult` from Qdrant carries a `payload` dict populated during ingestion.
-The context assembly layer reads the following fields:
-
-| Field | Source | Used for |
-|-------|--------|---------|
-| `text` | Chunker | Body of the context block |
-| `doc_title` | Ingestion metadata | Source attribution header |
-| `section_title` | Section parser | Source attribution header |
-| `source_file` | Ingestion metadata | Citation mapping + diversity filter key |
-| `chunk_index` | Chunker | Tie-breaking sort within same document |
-| `score` | Qdrant RRF | Ordering, footnote, confidence signal |
+Context assembly adds one layer: `AssembledChunk`, which normalises the payload and
+**tags each chunk with the sub-query (or sub-queries) that retrieved it**.
 
 ```python
 @dataclass
 class AssembledChunk:
-    """Normalised view of a SearchResult ready for prompt insertion."""
-    index: int              # 1-based citation number in the prompt
+    index: int                          # 1-based citation index in the prompt
     text: str
     doc_title: str
     section_title: str
     source_file: str
     score: float
-    token_count: int        # pre-computed to avoid redundant encode()
-
-def _to_assembled(index: int, chunk: SearchResult) -> AssembledChunk:
-    p = chunk.payload
-    text = p.get("text", "")
-    return AssembledChunk(
-        index        = index,
-        text         = text,
-        doc_title    = p.get("doc_title", "?"),
-        section_title= p.get("section_title", "?"),
-        source_file  = p.get("source_file", "?"),
-        score        = chunk.score,
-        token_count  = _count_tokens(text),
-    )
+    token_count: int                    # pre-computed; avoids redundant encode()
+    sub_query_indices: frozenset[int]   # which sub-queries (0-based) produced this chunk
+    primary_sub_query: int              # sub-query with the highest raw score for this chunk
 ```
 
-Pre-computing `token_count` here means the chain strategies (Stuffing, Map-Reduce,
-Refine) can make budget decisions without re-encoding the same text.
-
----
-
-### 4b. Chunk ordering before assembly
-
-Ordering affects which chunks survive when the token budget is tight and also
-influences LLM attention (models give more weight to content near the beginning
-and end of the context — the "lost in the middle" effect).
-
-#### SIMPLE queries — score-descending
-
-The most relevant single chunk goes first. If truncation occurs, the least relevant
-chunk is dropped.
+`sub_query_indices` may contain more than one value when the same chunk is retrieved
+by multiple sub-queries (e.g. a "muscle recovery" chunk fetched for both the PPL
+sub-query and the Upper/Lower sub-query). The **Compare** strategy uses this to
+route such chunks to the `SHARED PRINCIPLES` section.
 
 ```python
-def _order_simple(chunks: list[AssembledChunk]) -> list[AssembledChunk]:
-    return sorted(chunks, key=lambda c: c.score, reverse=True)
-```
-
-#### COMPLEX / COMPARISON queries — interleaved by sub-topic
-
-Pure score-descending can front-load all chunks from one sub-topic and bury the
-other. Instead, chunks are interleaved across source files so both topics appear
-near the top of the context:
-
-```python
-def _order_interleaved(chunks: list[AssembledChunk]) -> list[AssembledChunk]:
-    """
-    Round-robin across unique source files, highest-scored chunk first per source.
-    Ensures multi-topic queries see at least one chunk per topic before any source
-    gets a second chunk.
-    """
-    by_source: dict[str, list[AssembledChunk]] = {}
-    for c in sorted(chunks, key=lambda c: c.score, reverse=True):
-        by_source.setdefault(c.source_file, []).append(c)
-
-    result: list[AssembledChunk] = []
-    while any(by_source.values()):
-        for src in list(by_source.keys()):
-            if by_source[src]:
-                result.append(by_source[src].pop(0))
-            if not by_source[src]:
-                del by_source[src]
-    return result
-
-def order_chunks(
-    chunks: list[AssembledChunk],
-    query_type: QueryType,
+def _build_assembled_chunks(
+    results_per_query: list[list[SearchResult]],
 ) -> list[AssembledChunk]:
-    if query_type == "SIMPLE":
-        return _order_simple(chunks)
-    return _order_interleaved(chunks)
+    """
+    Flatten results_per_query into AssembledChunks.
+    Preserves sub-query origin so Compare / Chain strategies can group by step.
+    """
+    best_score: dict[str, float] = {}
+    best_sq: dict[str, int] = {}
+    sub_indices: dict[str, set[int]] = {}
+    by_id: dict[str, SearchResult] = {}
+
+    for sq_idx, results in enumerate(results_per_query):
+        for r in results:
+            sub_indices.setdefault(r.id, set()).add(sq_idx)
+            if r.id not in best_score or r.score > best_score[r.id]:
+                best_score[r.id] = r.score
+                best_sq[r.id] = sq_idx
+                by_id[r.id] = r
+
+    ordered_ids = sorted(by_id, key=lambda cid: best_score[cid], reverse=True)
+    assembled = []
+    for i, cid in enumerate(ordered_ids, start=1):
+        r = by_id[cid]
+        p = r.payload
+        text = p.get("text", "")
+        assembled.append(AssembledChunk(
+            index             = i,
+            text              = text,
+            doc_title         = p.get("doc_title", "?"),
+            section_title     = p.get("section_title", "?"),
+            source_file       = p.get("source_file", "?"),
+            score             = best_score[cid],
+            token_count       = _count_tokens(text),
+            sub_query_indices = frozenset(sub_indices[cid]),
+            primary_sub_query = best_sq[cid],
+        ))
+    return assembled
 ```
 
-Example for a COMPARISON query (PPL vs Upper/Lower):
-
-```
-Before interleaving (score-descending):          After interleaving:
-  [0.81] PPL structure                             [0.81] PPL structure
-  [0.79] PPL frequency                             [0.76] Upper/Lower structure
-  [0.76] Upper/Lower structure                     [0.79] PPL frequency
-  [0.72] Upper/Lower frequency                     [0.72] Upper/Lower frequency
-```
+**Key pipeline change:** `parallel_hybrid_search` must pass `results_per_query`
+(the list of per-sub-query result lists, before RRF merge) to `assemble_context()`
+so that `_build_assembled_chunks()` can tag each chunk with its sub-query origin.
 
 ---
 
-### 4c. Token budget
+### 4b. Token budget
 
 ```python
 import tiktoken
 
 _TOKENIZER = tiktoken.get_encoding("cl100k_base")
-MAX_CONTEXT_TOKENS = 1200   # hard cap for the chunk block
+MAX_CONTEXT_TOKENS = 1200   # hard cap for the entire chunk block
 
 def _count_tokens(text: str) -> int:
     return len(_TOKENIZER.encode(text))
@@ -795,288 +760,307 @@ def _count_tokens(text: str) -> int:
 | Component | Tokens | Cached? |
 |-----------|--------|---------|
 | System prompt | ~250 | Yes (Anthropic `cache_control: ephemeral`) |
-| Context block (up to 5 chunks) | ≤ 1 200 | No |
-| Multi-topic header (COMPLEX / COMPARISON) | +20 | No |
-| Synthesis instruction (COMPLEX / COMPARISON) | +25 | No |
+| Context block (all chunks) | ≤ 1 200 | No |
+| Compare / Chain section headers | +20–40 | No |
+| Synthesis instruction (COMPARISON / COMPLEX) | +25 | No |
 | User question | ~20 | No |
 | **Total** | **≤ 1 520** | |
 
+For Compare and Chain, the 1 200-token budget is divided **equally across sections**
+so no single side or step can crowd out the others.
+
 ---
 
-### 4d. Chunk formatting
+### 4c. Chunk formatting
 
 ```python
 def _format_chunk(chunk: AssembledChunk) -> str:
     header = (
-        f"[{chunk.index}] Source: {chunk.doc_title} > "
-        f"{chunk.section_title} ({chunk.source_file})"
+        f"[SOURCE: {chunk.source_file} | Section: {chunk.section_title}]"
     )
-    separator = "─" * 56
-    return f"{header}\n{separator}\n{chunk.text}"
+    return f"{header}\n{chunk.text}"
 ```
 
-Rendered output:
-
-```
-[1] Source: Progressive Overload > Rate of Progression (08-progressive-overload.md)
-────────────────────────────────────────────────────────────────
-- Beginners: Can add weight almost every session (newbie gains)
-- Intermediate: Weekly or biweekly progression
-- Advanced: Monthly or per training block (mesocycle)
-
-[2] Source: Workout Splits > Push-Pull-Legs Structure (14-workout-split-ppl.md)
-────────────────────────────────────────────────────────────────
-A PPL split trains each muscle group twice per week with focused sessions...
-```
-
-The `[N]` citation index is the contract between the context block and the LLM —
-the generation step instructs the model to cite sources using this notation, and
-`filter_output()` validates that all returned indices are in-bounds.
+The `[SOURCE: …]` tag is informational context for the LLM. The canonical citation
+number (`[N]`) lives on `AssembledChunk.index` and is used by the generation step —
+the LLM is instructed to cite sources as `[1]`, `[2]`, etc., and `filter_output()`
+validates that all returned indices are in-bounds.
 
 ---
 
-### 4e. Chain strategy
-
-The chain strategy controls how many LLM calls context assembly uses and how
-those calls are structured. The strategy is selected automatically by comparing
-the total token count of all ordered chunks against `MAX_CONTEXT_TOKENS`.
+### 4d. Strategy selection
 
 ```python
-ChainStrategy = Literal["stuffing", "map_reduce", "refine"]
+ChainStrategy = Literal["compare", "chain", "aggregate"]
 
-def select_chain_strategy(
-    chunks: list[AssembledChunk],
-    query_type: QueryType,
-) -> ChainStrategy:
-    total = sum(c.token_count for c in chunks)
-    if total <= MAX_CONTEXT_TOKENS:
-        return "stuffing"           # default — fits in one prompt
-    if query_type in ("COMPLEX", "COMPARISON"):
-        return "map_reduce"         # need to synthesise across independent topics
-    return "refine"                 # single topic — iteratively deepen the answer
+def select_chain_strategy(query_type: QueryType) -> ChainStrategy:
+    if query_type == "COMPARISON":
+        return "compare"
+    if query_type == "COMPLEX":
+        return "chain"
+    return "aggregate"      # SIMPLE
 ```
 
-| Strategy | When selected | LLM calls in assembly | Latency |
-|----------|--------------|----------------------|---------|
-| **Stuffing** | Total tokens ≤ 1 200 (normal case) | 0 (pure formatting) | ~5 ms |
-| **Map-Reduce** | Overflow + COMPLEX / COMPARISON | N (map) + 1 (reduce) | ~N×500 ms |
-| **Refine** | Overflow + SIMPLE | N – 1 (refinement steps) | ~N×500 ms |
+---
 
-> In practice, with `max_sources=5` and average chunk size of ~200 tokens, Stuffing
-> handles ≥ 95 % of requests. Map-Reduce and Refine are safety valves for unusually
-> verbose knowledge-base sections (e.g. a 600-token "complete training program" chunk).
+### 4e. Strategy: Aggregate (SIMPLE)
 
-#### Stuffing (default)
+No structural grouping. Chunks are ordered by relevance score and concatenated.
+The LLM synthesises the answer directly from the flat list.
 
-All ordered chunks that fit within `MAX_CONTEXT_TOKENS` are concatenated into a
-single context block. No extra LLM calls.
+```
+[CONTEXT — AGGREGATED]
+
+[SOURCE: 20-training-for-beginners.md | Section: Starting Out]
+The first 6–12 months is the most productive period...
+
+[SOURCE: 08-progressive-overload.md | Section: Rate of Progression]
+Beginners can add weight almost every session...
+
+[SOURCE: 16-workout-split-full-body.md | Section: Advantages]
+Highest training frequency, most time-efficient...
+
+[SOURCE: 13-nutrition-basics.md | Section: Caloric Goals]
+Muscle building requires caloric surplus of 200–500 calories...
+```
 
 ```python
-def _stuffing(
+def _format_aggregate(
     chunks: list[AssembledChunk],
-    query_type: QueryType,
     max_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> tuple[str, list[AssembledChunk]]:
     entries: list[str] = []
     used: list[AssembledChunk] = []
     total = 0
 
-    for chunk in chunks:
+    for chunk in sorted(chunks, key=lambda c: c.score, reverse=True):
         entry = _format_chunk(chunk)
         t = _count_tokens(entry)
         if total + t > max_tokens:
-            break               # drop trailing chunks that would overflow
+            break
         entries.append(entry)
         used.append(chunk)
         total += t
 
-    block = "\n\n".join(entries)
-    if query_type in ("COMPLEX", "COMPARISON"):
-        block = (
-            "Note: the following context covers multiple sub-topics related to "
-            "your question. Use all relevant sections when composing your answer.\n\n"
-            + block
-        )
+    block = "[CONTEXT — AGGREGATED]\n\n" + "\n\n".join(entries)
     return block, used
 ```
 
-**Truncation order:** chunks are already ordered by `order_chunks()` — for SIMPLE
-(score-descending) the most relevant chunk is always kept; for COMPLEX (interleaved)
-at least one chunk per sub-topic enters the prompt before any source gets a second.
-
 ---
 
-#### Map-Reduce (COMPLEX / COMPARISON overflow)
+### 4f. Strategy: Compare (COMPARISON)
 
-Each chunk is passed to Haiku independently to extract the sub-answer relevant to
-the user's question. The resulting sub-answers are then assembled as the context
-for the final generation call (Section 5).
+Chunks are grouped by "side" — each `primary_sub_query` value forms one named
+section. Chunks that were retrieved by **two or more sub-queries**
+(`len(sub_query_indices) > 1`) are separated out into a **SHARED PRINCIPLES**
+section at the end.
+
+**Why group by side rather than interleave A-B-A-B?**
+Interleaving forces the LLM to jump between topics while generating each sentence.
+Grouping lets it "read all of A", "read all of B", then compare — matching how
+humans reason through comparisons naturally and reducing mid-generation confusion.
 
 ```
-Chunks:  [C1]  [C2]  [C3]  [C4]  [C5]
-          │     │     │     │     │       ← parallel Haiku calls (map)
-          ▼     ▼     ▼     ▼     ▼
-         [S1]  [S2]  [S3]  [S4]  [S5]    ← sub-answers (~80 tokens each)
-          └─────┴─────┴─────┴─────┘
-                        │
-                        ▼
-              assembled sub-answer context (~400 tokens)
-                        │
-                        ▼
-              Sonnet generation call (reduce)
+[CONTEXT — COMPARISON]
+
+=== PPL SPLIT ===
+[SOURCE: 14-workout-split-ppl.md | Section: Overview]
+PPL divides training into Push, Pull, Legs sessions...
+
+[SOURCE: 14-workout-split-ppl.md | Section: Who Is It For]
+Intermediate to advanced lifters, 6 days per week...
+
+[SOURCE: 14-workout-split-ppl.md | Section: Drawbacks]
+Requires 6 days commitment, can be fatiguing...
+
+=== UPPER/LOWER SPLIT ===
+[SOURCE: 15-workout-split-upper-lower.md | Section: Overview]
+Upper/Lower divides into upper-body and lower-body days...
+
+[SOURCE: 15-workout-split-upper-lower.md | Section: Who Is It For]
+Intermediate lifters, 4 days per week...
+
+[SOURCE: 15-workout-split-upper-lower.md | Section: Advantages]
+Built-in recovery, flexible scheduling...
+
+=== SHARED PRINCIPLES ===
+[SOURCE: 12-muscle-recovery.md | Section: Recovery Timeline]
+Most muscle groups recover in 48–72 hours...
 ```
+
+The **group label** is derived from the `doc_title` of the highest-scored chunk
+in each sub-query group, uppercased. The token budget is split equally across all
+sections (sides + shared) so neither option dominates.
 
 ```python
-_MAP_SYSTEM = """\
-Extract the information from the context that is directly relevant to answering
-the question below. Return only the extracted facts, condensed to ≤ 80 tokens.
-If the context is not relevant, return an empty string."""
-
-async def _map_chunk(
-    question: str,
-    chunk: AssembledChunk,
-    provider: BaseLLMProvider,
-) -> str:
-    prompt = f"Question: {question}\n\nContext:\n{chunk.text}"
-    resp = await provider.complete(
-        messages=[LLMMessage(role="user", content=prompt)],
-        system=_MAP_SYSTEM,
-        max_tokens=100,
-        temperature=0.0,
-    )
-    return resp.content.strip()
-
-async def _map_reduce(
-    question: str,
+def _format_compare(
     chunks: list[AssembledChunk],
-    provider: BaseLLMProvider,
+    sub_questions: list[str],
+    max_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> tuple[str, list[AssembledChunk]]:
-    sub_answers: list[str] = await asyncio.gather(
-        *[_map_chunk(question, c, provider) for c in chunks]
-    )
-    entries = []
-    used = []
-    for chunk, sub in zip(chunks, sub_answers):
-        if sub:                        # skip chunks the map step found irrelevant
-            entries.append(
-                f"[{chunk.index}] Source: {chunk.doc_title} > "
-                f"{chunk.section_title}\n{'─'*56}\n{sub}"
-            )
+    # Shared chunks: retrieved by more than one sub-query
+    shared = [c for c in chunks if len(c.sub_query_indices) > 1]
+    sides  = [c for c in chunks if len(c.sub_query_indices) == 1]
+
+    # Group side-specific chunks by sub-query index; sort each group by score
+    by_sq: dict[int, list[AssembledChunk]] = {}
+    for c in sides:
+        by_sq.setdefault(c.primary_sub_query, []).append(c)
+    for sq in by_sq:
+        by_sq[sq].sort(key=lambda c: c.score, reverse=True)
+
+    num_sections = len(by_sq) + (1 if shared else 0)
+    tokens_per_section = max_tokens // max(num_sections, 1)
+
+    sections: list[str] = []
+    used: list[AssembledChunk] = []
+
+    for sq_idx in sorted(by_sq):
+        group_chunks = by_sq[sq_idx]
+        label = group_chunks[0].doc_title.upper() if group_chunks else f"OPTION {sq_idx + 1}"
+        entries: list[str] = []
+        section_total = 0
+        for chunk in group_chunks:
+            entry = _format_chunk(chunk)
+            t = _count_tokens(entry)
+            if section_total + t > tokens_per_section:
+                break
+            entries.append(entry)
             used.append(chunk)
+            section_total += t
+        if entries:
+            sections.append(f"=== {label} ===\n" + "\n\n".join(entries))
 
-    return "\n\n".join(entries), used
+    if shared:
+        shared_entries: list[str] = []
+        section_total = 0
+        for chunk in sorted(shared, key=lambda c: c.score, reverse=True):
+            entry = _format_chunk(chunk)
+            t = _count_tokens(entry)
+            if section_total + t > tokens_per_section:
+                break
+            shared_entries.append(entry)
+            used.append(chunk)
+            section_total += t
+        if shared_entries:
+            sections.append("=== SHARED PRINCIPLES ===\n" + "\n\n".join(shared_entries))
+
+    block = "[CONTEXT — COMPARISON]\n\n" + "\n\n".join(sections)
+    return block, used
 ```
-
-Map calls run **concurrently** via `asyncio.gather` — latency is the cost of one
-Haiku call (~150 ms), not N calls.
 
 ---
 
-#### Refine (SIMPLE overflow)
+### 4g. Strategy: Chain (COMPLEX)
 
-Used when a single-topic query has too many large chunks to stuff. Each chunk
-progressively enriches an initial answer, giving the LLM a chance to deepen its
-response with each additional source.
+Chunks are ordered by **sub-query step** — reflecting the causal or logical
+progression of the decomposed question. No extra LLM call is needed: each
+sub-query was written to target a specific part of the reasoning chain, so the
+sub-query that retrieved a chunk implicitly defines its step.
 
 ```
-[C1] → initial answer A1
-[C2] + A1 → refined answer A2
-[C3] + A2 → refined answer A3   ← final context handed to Sonnet generation
+[CONTEXT — CAUSAL CHAIN]
+
+=== STEP 1: SHOULDER PAIN CAUSE ===
+[SOURCE: 18-common-injuries.md | Section: Shoulder Impingement]
+Cause: Excessive pressing volume, poor scapular mechanics...
+Symptoms: Pain during pressing overhead...
+
+[SOURCE: 04-overhead-press.md | Section: Common Mistakes]
+Excessive lower back arch, pressing bar forward...
+
+=== STEP 2: SIGNS OF OVERREACHING ===
+[SOURCE: 10-deload.md | Section: Signs of Overreaching]
+Strength plateau, persistent joint pain, poor sleep...
+
+[SOURCE: 14-workout-split-ppl.md | Section: Drawbacks]
+Can be fatiguing if recovery is suboptimal...
+
+=== STEP 3: DELOAD PROTOCOL ===
+[SOURCE: 10-deload.md | Section: How to Deload]
+Option 1: Reduce volume — keep weight, cut sets 40–50%...
+
+[SOURCE: 18-common-injuries.md | Section: Shoulder Prevention]
+Include face pulls, balance push/pull volume 1:1...
 ```
+
+**Step label** is the sub-question text truncated to 50 characters and uppercased —
+no extra LLM call needed. The token budget is split equally across steps.
 
 ```python
-_REFINE_INITIAL_SYSTEM = """\
-Answer the question using only the context below.
-Keep your answer under 120 tokens — it will be refined with additional context."""
+def _short_label(text: str, max_len: int = 50) -> str:
+    s = text.strip().upper()
+    return s[:max_len].rstrip() + ("..." if len(s) > max_len else "")
 
-_REFINE_STEP_SYSTEM = """\
-You have an existing partial answer and new context.
-Refine the answer to incorporate any new relevant information from the context.
-If the new context adds nothing, return the existing answer unchanged.
-Keep the refined answer under 150 tokens."""
-
-async def _refine(
-    question: str,
+def _format_chain(
     chunks: list[AssembledChunk],
-    provider: BaseLLMProvider,
+    sub_questions: list[str],
+    max_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> tuple[str, list[AssembledChunk]]:
-    if not chunks:
-        return "", []
+    by_sq: dict[int, list[AssembledChunk]] = {}
+    for c in chunks:
+        by_sq.setdefault(c.primary_sub_query, []).append(c)
+    for sq in by_sq:
+        by_sq[sq].sort(key=lambda c: c.score, reverse=True)
 
-    # Step 1: initial answer from first chunk
-    initial_prompt = f"Question: {question}\n\nContext:\n{chunks[0].text}"
-    resp = await provider.complete(
-        messages=[LLMMessage(role="user", content=initial_prompt)],
-        system=_REFINE_INITIAL_SYSTEM,
-        max_tokens=150,
-        temperature=0.0,
-    )
-    answer = resp.content.strip()
-    used = [chunks[0]]
+    num_steps = max(len(by_sq), 1)
+    tokens_per_step = max_tokens // num_steps
 
-    # Steps 2…N: iteratively refine with each additional chunk
-    for chunk in chunks[1:]:
-        refine_prompt = (
-            f"Question: {question}\n\n"
-            f"Existing answer:\n{answer}\n\n"
-            f"New context:\n{chunk.text}"
-        )
-        resp = await provider.complete(
-            messages=[LLMMessage(role="user", content=refine_prompt)],
-            system=_REFINE_STEP_SYSTEM,
-            max_tokens=180,
-            temperature=0.0,
-        )
-        answer = resp.content.strip()
-        used.append(chunk)
+    sections: list[str] = []
+    used: list[AssembledChunk] = []
 
-    # The refined answer becomes the context block for the Sonnet generation call
-    context = (
-        f"[Refined context from {len(used)} sources]\n{'─'*56}\n{answer}\n\n"
-        + "\n\n".join(
-            f"[{c.index}] {c.doc_title} > {c.section_title} ({c.source_file})"
-            for c in used
-        )
-    )
-    return context, used
+    for sq_idx in sorted(by_sq):
+        sub_label = _short_label(sub_questions[sq_idx]) if sq_idx < len(sub_questions) else f"STEP {sq_idx + 1}"
+        entries: list[str] = []
+        step_total = 0
+        for chunk in by_sq[sq_idx]:
+            entry = _format_chunk(chunk)
+            t = _count_tokens(entry)
+            if step_total + t > tokens_per_step:
+                break
+            entries.append(entry)
+            used.append(chunk)
+            step_total += t
+        if entries:
+            sections.append(f"=== STEP {sq_idx + 1}: {sub_label} ===\n" + "\n\n".join(entries))
+
+    block = "[CONTEXT — CAUSAL CHAIN]\n\n" + "\n\n".join(sections)
+    return block, used
 ```
-
-Refine is **sequential** by design — each step depends on the previous answer.
-It costs N – 1 extra Haiku calls but produces a distilled, single-topic context
-that is less noisy for the final generation step.
 
 ---
 
-### 4f. Unified assembly entry point
+### 4h. Unified entry point
 
 ```python
-async def assemble_context(
-    chunks: list[SearchResult],
-    question: str,
+def assemble_context(
+    results_per_query: list[list[SearchResult]],
+    sub_questions: list[str],
     query_type: QueryType,
-    provider: BaseLLMProvider,
     max_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> tuple[str, list[AssembledChunk]]:
     """
     Full context assembly pipeline:
-      1. Normalise SearchResult → AssembledChunk
-      2. Order chunks (score-desc or interleaved)
-      3. Select chain strategy
-      4. Execute strategy → (context_string, used_chunks)
+      1. Build AssembledChunk list with sub-query origin tags
+      2. Select strategy from query_type
+      3. Format context string with per-section token guard
+    Returns (context_string, used_chunks).
     """
-    assembled = [_to_assembled(i + 1, c) for i, c in enumerate(chunks)]
-    ordered   = order_chunks(assembled, query_type)
-    strategy  = select_chain_strategy(ordered, query_type)
+    chunks   = _build_assembled_chunks(results_per_query)
+    strategy = select_chain_strategy(query_type)
 
-    if strategy == "stuffing":
-        return _stuffing(ordered, query_type, max_tokens)
-    if strategy == "map_reduce":
-        return await _map_reduce(question, ordered, provider)
-    return await _refine(question, ordered, provider)
+    if strategy == "compare":
+        return _format_compare(chunks, sub_questions, max_tokens)
+    if strategy == "chain":
+        return _format_chain(chunks, sub_questions, max_tokens)
+    return _format_aggregate(chunks, max_tokens)
 ```
 
-The caller (Section 5 generation) only interacts with `assemble_context()` —
-it is unaware of which chain strategy ran internally.
+`assemble_context()` is now a pure synchronous function — no LLM calls inside
+assembly. The Map-Reduce and Refine overflow paths were removed: with `max_sources=5`
+and average chunk size ~200 tokens, the total context almost never exceeds 1 200 tokens.
+If it does, the per-section token guard in Compare/Chain drops the lowest-ranked
+trailing chunks in that section rather than invoking extra model calls.
 
 ---
 
@@ -1321,9 +1305,9 @@ class RAGResponse(BaseModel):
 | Hybrid search (Qdrant) | ~10 ms | ~10 ms (concurrent, dominated by 1 call) |
 | Deduplication + RRF re-ranking | ~1 ms | ~2 ms |
 | Diversity filter | — | ~1 ms |
-| Context assembly — Stuffing (default, ≥95% of requests) | ~5 ms | ~5 ms |
-| Context assembly — Map-Reduce (overflow, COMPLEX) | — | ~150 ms (parallel map) |
-| Context assembly — Refine (overflow, SIMPLE) | — | ~(N–1)×150 ms (sequential) |
+| Context assembly — Aggregate (SIMPLE) | ~5 ms | — |
+| Context assembly — Chain (COMPLEX) | — | ~5 ms |
+| Context assembly — Compare (COMPARISON) | — | ~5 ms |
 | Guardrail Layer 2 (if triggered) | ~200 ms | ~200 ms |
 | LLM generation | ~800 ms | ~1 000 ms (longer synthesis) |
 | Layer 3 output filter | ~5 ms | ~5 ms |
@@ -1403,8 +1387,8 @@ Client        API Route     QueryProcessor    Retriever       Qdrant       Haiku
 | RRF produces 0 chunks after score threshold filter | Return out-of-scope response (same path as zero search results) |
 | Merged result count < 2 | Return what was found, no error |
 | Diversity filter reduces pool to < 2 chunks | Return the filtered chunks as-is; 1 chunk is still useful |
-| First chunk alone exceeds context budget (Stuffing) | Include first chunk only — `_stuffing()` breaks on first iteration |
-| Map-Reduce map step returns empty for all chunks | `_map_reduce()` returns empty context → out-of-scope response |
-| Refine provider call times out mid-chain | Return answer accumulated so far; do not retry remaining chunks |
+| First chunk alone exceeds per-section token budget (Compare / Chain) | Include first chunk only in that section; other sections are unaffected |
+| All chunks tagged as shared (every chunk in multiple sub-queries) | Compare falls back to a single `=== SHARED PRINCIPLES ===` section with all chunks |
+| Decomposition returns only 1 sub-question (COMPLEX path) | Chain produces a single `=== STEP 1 ===` section, effectively equivalent to Aggregate |
 | LLM output is not valid JSON | `parse_llm_output()` falls back to raw text + cite all chunks |
 | LLM cites index out of bounds | Silently drop (bounds check in `filter_output()`) |
