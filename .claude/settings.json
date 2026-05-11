@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(pytest:*)",
+      "Bash(alembic:*)",
+      "Bash(uvicorn:*)",
+      "Bash(npm run:*)",
+      "Bash(pip:*)",
+      "Bash(python:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/secret-scan.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
