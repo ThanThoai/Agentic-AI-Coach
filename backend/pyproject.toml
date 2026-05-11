@@ -1,0 +1,71 @@
+[project]
+name = "coach-agent-backend"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    # Web framework
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    # Database
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    # Validation & config
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    # LLM providers
+    "anthropic>=0.30",           # Anthropic / Claude
+    "openai>=1.35",              # OpenAI, Grok (xAI), OpenRouter (all OpenAI-compat)
+    "google-generativeai>=0.7",  # Gemini
+    # Vector database
+    "qdrant-client>=1.10",
+    # Cache
+    "redis[hiredis]>=5.0",
+    # HTTP client (for custom provider integrations)
+    "httpx>=0.27",
+    # Logging
+    "structlog>=24.0",
+    # Security
+    "passlib[bcrypt]>=1.7",
+    "python-jose[cryptography]>=3.3",
+    "python-multipart>=0.0.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.14",
+    "httpx>=0.27",          # AsyncClient for FastAPI testing
+    "respx>=0.21",          # Mock httpx calls
+    "factory-boy>=3.3",     # Test data factories
+    "coverage[toml]>=7.5",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "mock: tests that run fully offline with mocked providers (default)",
+    "live: tests that call real APIs — require env vars to be set",
+]
+# Live tests are opt-in: run with `uv run pytest -m live`
+addopts = "-m 'not live'"
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["tests/*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
