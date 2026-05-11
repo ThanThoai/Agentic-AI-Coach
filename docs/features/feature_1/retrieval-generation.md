@@ -1030,37 +1030,294 @@ def _format_chain(
 
 ---
 
-### 4h. Unified entry point
+### 4h. Conflict detection and handling
+
+When decomposition splits a query into independent sub-questions, each retrieves
+evidence in isolation. Occasionally two chunks from **different sub-queries** make
+mutually contradictory factual claims — not just different recommendations for
+different populations, but claims that cannot both be true for the same context.
+
+Examples in fitness content:
+
+| Source A | Source B | Type |
+|----------|----------|------|
+| "Optimal volume is 10–20 sets/week" | "5–10 working sets is sufficient" | Numeric range conflict |
+| "Creatine does not cause water retention" | "Creatine increases intramuscular water content" | Causal conflict |
+| "High pressing volume causes impingement" | "Elite athletes train 25–30 sets/week without issues" | Threshold conflict |
+
+Surfacing these before generation prevents the LLM from silently averaging
+conflicting advice into a confident-sounding but inaccurate answer.
+
+---
+
+#### Detection: two-pass approach
+
+**Pass 1 — Heuristic (0 ms, 0 tokens)**
+
+Checks all cross-sub-query chunk pairs for opposite-polarity phrases. Only pairs
+from different sub-queries are checked — same-sub-query chunks are assumed coherent.
+With `max_sources=5`, there are at most 10 pairs to check.
 
 ```python
-def assemble_context(
+@dataclass
+class ConflictPair:
+    chunk_a_index: int    # AssembledChunk.index (1-based)
+    chunk_b_index: int
+    topic: str            # short phrase describing what is in conflict
+
+_CONTRADICTION_PATTERNS: list[tuple[re.Pattern, re.Pattern]] = [
+    (re.compile(r"\bshould\b"),        re.compile(r"\bshould not\b|shouldn't")),
+    (re.compile(r"\bincreases?\b"),    re.compile(r"\bdecreases?\b")),
+    (re.compile(r"\bis safe\b"),       re.compile(r"\bis dangerous\b|is harmful\b")),
+    (re.compile(r"\bis effective\b"),  re.compile(r"\bis not effective\b|is ineffective\b")),
+    (re.compile(r"\brecommended\b"),   re.compile(r"\bnot recommended\b")),
+    (re.compile(r"\bcauses?\b"),       re.compile(r"\bdoes not cause\b|doesn't cause\b")),
+]
+
+def _heuristic_conflict(a: AssembledChunk, b: AssembledChunk) -> bool:
+    ta, tb = a.text.lower(), b.text.lower()
+    for pos_pat, neg_pat in _CONTRADICTION_PATTERNS:
+        a_pos = bool(pos_pat.search(ta)) and not bool(neg_pat.search(ta))
+        a_neg = bool(neg_pat.search(ta))
+        b_pos = bool(pos_pat.search(tb)) and not bool(neg_pat.search(tb))
+        b_neg = bool(neg_pat.search(tb))
+        if (a_pos and b_neg) or (a_neg and b_pos):
+            return True
+    return False
+
+def detect_conflicts_heuristic(chunks: list[AssembledChunk]) -> list[ConflictPair]:
+    conflicts: list[ConflictPair] = []
+    for i, a in enumerate(chunks):
+        for b in chunks[i + 1:]:
+            if a.primary_sub_query == b.primary_sub_query:
+                continue    # same sub-query — skip
+            if _heuristic_conflict(a, b):
+                conflicts.append(ConflictPair(a.index, b.index, topic="conflicting claims"))
+    return conflicts
+```
+
+**Pass 2 — LLM re-check (only when heuristic flags ≥ 1 candidate)**
+
+Haiku re-examines heuristic candidates with a focused prompt. This step reduces
+false positives (e.g. two different scopes mentioning both sides of a statement)
+and fills in the `topic` field with a precise phrase for the annotation.
+
+```python
+_CONFLICT_CHECK_SYSTEM = """\
+Compare two fitness knowledge excerpts.
+Determine if they make mutually contradictory factual claims — claims that
+cannot both be true for the same population and goal.
+
+Different recommendations for different populations (beginner vs advanced)
+or different goals (strength vs hypertrophy) are NOT contradictions.
+Only flag hard factual contradictions (e.g. "X increases Y" vs "X decreases Y").
+
+Return JSON only: {"conflict": true | false, "topic": "<one short phrase or empty>"}"""
+
+async def _llm_conflict_check(
+    a: AssembledChunk,
+    b: AssembledChunk,
+    provider: BaseLLMProvider,
+) -> ConflictPair | None:
+    prompt = f"Excerpt A:\n{a.text[:400]}\n\nExcerpt B:\n{b.text[:400]}"
+    resp = await provider.complete(
+        messages=[LLMMessage(role="user", content=prompt)],
+        system=_CONFLICT_CHECK_SYSTEM,
+        max_tokens=60,
+        temperature=0.0,
+    )
+    try:
+        data = json.loads(_extract_json_block(resp.content))
+        if data.get("conflict"):
+            topic = data.get("topic") or "conflicting claims"
+            return ConflictPair(a.index, b.index, topic)
+    except Exception:
+        pass
+    return None
+
+async def detect_conflicts(
+    chunks: list[AssembledChunk],
+    provider: BaseLLMProvider | None = None,
+) -> list[ConflictPair]:
+    """
+    Pass 1: heuristic (always runs).
+    Pass 2: LLM re-check on candidates (only if provider is given).
+    LLM calls run concurrently — latency cost is one Haiku call (~150 ms).
+    """
+    candidates = detect_conflicts_heuristic(chunks)
+    if not candidates or provider is None:
+        return candidates
+
+    by_index = {c.index: c for c in chunks}
+    results = await asyncio.gather(*[
+        _llm_conflict_check(by_index[cp.chunk_a_index], by_index[cp.chunk_b_index], provider)
+        for cp in candidates
+    ])
+    return [r for r in results if r is not None]
+```
+
+---
+
+#### Annotation format per strategy
+
+Conflict rendering differs by strategy so the structural intent of each layout
+is preserved while still surfacing the disagreement.
+
+**Aggregate — inline `⚠ CONFLICTS WITH SOURCE N` tag on the lower-scored chunk:**
+
+```
+[CONTEXT — AGGREGATED]
+
+[SOURCE: 08-progressive-overload.md | Section: Volume Guidelines]
+Optimal training volume is 10–20 sets per muscle group per week...
+
+[SOURCE: 05-strength-training.md | Section: Strength Periodisation]
+⚠ CONFLICTS WITH SOURCE 1 (topic: recommended volume)
+For strength-focused athletes, 5–10 working sets per session is sufficient...
+```
+
+**Compare — conflicting cross-side chunks are moved out of their side sections
+into a dedicated `=== DISPUTED ===` block:**
+
+Pulling both conflicting chunks out and placing them together lets the LLM see
+the disagreement in one place rather than encountering it mid-comparison.
+
+```
+[CONTEXT — COMPARISON]
+
+=== PPL SPLIT ===
+[SOURCE: 14-workout-split-ppl.md | Section: Overview]
+PPL divides training into Push, Pull, Legs sessions...
+
+=== UPPER/LOWER SPLIT ===
+[SOURCE: 15-workout-split-upper-lower.md | Section: Overview]
+Upper/Lower divides into upper-body and lower-body days...
+
+=== DISPUTED ===
+[SOURCE: 14-workout-split-ppl.md | Section: Recovery]
+PPL requires at least 48 hours between same-muscle sessions...
+
+[SOURCE: 09-recovery-science.md | Section: Frequency Research]
+⚠ CONFLICTS WITH SOURCE ABOVE (topic: recovery time between sessions)
+Research suggests 24 hours is sufficient for trained athletes...
+
+=== SHARED PRINCIPLES ===
+[SOURCE: 12-muscle-recovery.md | Section: Recovery Timeline]
+Most muscle groups recover in 48–72 hours...
+```
+
+**Chain — conflicting later-step chunk is tagged with the earlier step it contradicts:**
+
+```
+[CONTEXT — CAUSAL CHAIN]
+
+=== STEP 1: SHOULDER PAIN CAUSE ===
+[SOURCE: 18-common-injuries.md | Section: Shoulder Impingement]
+Cause: excessive pressing volume above 20 sets/week...
+
+=== STEP 3: DELOAD PROTOCOL ===
+[SOURCE: 10-deload.md | Section: How to Deload]
+Reduce volume by 40–50% and maintain intensity...
+
+[SOURCE: 18-common-injuries.md | Section: Shoulder Prevention]
+⚠ CONFLICTS WITH STEP 1 (topic: pressing volume threshold)
+Elite athletes often train 25–30 sets/week without impingement symptoms...
+```
+
+---
+
+#### Conflict-aware chunk helpers
+
+```python
+def _conflict_tag(chunk: AssembledChunk, conflicts: list[ConflictPair]) -> str:
+    """Return inline warning line if this chunk is involved in a conflict."""
+    related = [
+        cp for cp in conflicts
+        if cp.chunk_a_index == chunk.index or cp.chunk_b_index == chunk.index
+    ]
+    if not related:
+        return ""
+    other_indices = [
+        cp.chunk_b_index if cp.chunk_a_index == chunk.index else cp.chunk_a_index
+        for cp in related
+    ]
+    topic = related[0].topic
+    refs = ", ".join(f"Source {i}" for i in other_indices)
+    return f"⚠ CONFLICTS WITH {refs} (topic: {topic})\n"
+
+def _format_chunk_annotated(
+    chunk: AssembledChunk,
+    conflicts: list[ConflictPair],
+) -> str:
+    tag = _conflict_tag(chunk, conflicts)
+    header = f"[SOURCE: {chunk.source_file} | Section: {chunk.section_title}]"
+    return f"{header}\n{tag}{chunk.text}"
+```
+
+All three strategy formatters (`_format_aggregate`, `_format_compare`, `_format_chain`)
+call `_format_chunk_annotated` instead of `_format_chunk` when a `conflicts` list is
+provided, and `_format_compare` additionally separates conflict-involved chunks into
+the `=== DISPUTED ===` section.
+
+---
+
+#### Conflict instruction injection
+
+When any conflicts survive both passes, a machine-readable instruction block is
+appended after the last section. The generation step (Section 5) receives this
+as part of the context string — no extra function call needed.
+
+```python
+def _build_conflict_note(conflicts: list[ConflictPair]) -> str:
+    topics = ", ".join(dict.fromkeys(cp.topic for cp in conflicts))  # deduplicated, ordered
+    return (
+        "\n\n[⚠ CONFLICTING SOURCES DETECTED]\n"
+        f"Sources disagree on: {topics}.\n"
+        "In your answer, present both perspectives explicitly and acknowledge "
+        "that the sources disagree. Do not pick one side without noting the disagreement."
+    )
+```
+
+---
+
+### 4i. Unified entry point
+
+```python
+async def assemble_context(
     results_per_query: list[list[SearchResult]],
     sub_questions: list[str],
     query_type: QueryType,
+    provider: BaseLLMProvider | None = None,
     max_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> tuple[str, list[AssembledChunk]]:
     """
     Full context assembly pipeline:
       1. Build AssembledChunk list with sub-query origin tags
-      2. Select strategy from query_type
-      3. Format context string with per-section token guard
+      2. Detect conflicting cross-sub-query chunks (heuristic + optional LLM)
+      3. Select strategy from query_type
+      4. Format context string with per-section token guard and conflict annotations
     Returns (context_string, used_chunks).
     """
-    chunks   = _build_assembled_chunks(results_per_query)
-    strategy = select_chain_strategy(query_type)
+    chunks    = _build_assembled_chunks(results_per_query)
+    conflicts = await detect_conflicts(chunks, provider)
+    strategy  = select_chain_strategy(query_type)
 
     if strategy == "compare":
-        return _format_compare(chunks, sub_questions, max_tokens)
-    if strategy == "chain":
-        return _format_chain(chunks, sub_questions, max_tokens)
-    return _format_aggregate(chunks, max_tokens)
+        context, used = _format_compare(chunks, sub_questions, conflicts, max_tokens)
+    elif strategy == "chain":
+        context, used = _format_chain(chunks, sub_questions, conflicts, max_tokens)
+    else:
+        context, used = _format_aggregate(chunks, conflicts, max_tokens)
+
+    if conflicts:
+        context += _build_conflict_note(conflicts)
+
+    return context, used
 ```
 
-`assemble_context()` is now a pure synchronous function — no LLM calls inside
-assembly. The Map-Reduce and Refine overflow paths were removed: with `max_sources=5`
-and average chunk size ~200 tokens, the total context almost never exceeds 1 200 tokens.
-If it does, the per-section token guard in Compare/Chain drops the lowest-ranked
-trailing chunks in that section rather than invoking extra model calls.
+`provider=None` skips the LLM conflict check and uses heuristics only (0 ms,
+0 tokens). Pass the same provider used for generation when you want higher-precision
+conflict detection at the cost of one Haiku call.
 
 ---
 
@@ -1308,6 +1565,8 @@ class RAGResponse(BaseModel):
 | Context assembly — Aggregate (SIMPLE) | ~5 ms | — |
 | Context assembly — Chain (COMPLEX) | — | ~5 ms |
 | Context assembly — Compare (COMPARISON) | — | ~5 ms |
+| Conflict detection — heuristic only (always) | ~1 ms | ~1 ms |
+| Conflict detection — LLM re-check (if heuristic flags) | ~150 ms (concurrent) | ~150 ms (concurrent) |
 | Guardrail Layer 2 (if triggered) | ~200 ms | ~200 ms |
 | LLM generation | ~800 ms | ~1 000 ms (longer synthesis) |
 | Layer 3 output filter | ~5 ms | ~5 ms |
@@ -1389,6 +1648,9 @@ Client        API Route     QueryProcessor    Retriever       Qdrant       Haiku
 | Diversity filter reduces pool to < 2 chunks | Return the filtered chunks as-is; 1 chunk is still useful |
 | First chunk alone exceeds per-section token budget (Compare / Chain) | Include first chunk only in that section; other sections are unaffected |
 | All chunks tagged as shared (every chunk in multiple sub-queries) | Compare falls back to a single `=== SHARED PRINCIPLES ===` section with all chunks |
+| Heuristic fires a false positive (same statement, different scope) | LLM re-check clears it; if `provider=None`, tag appears in context but generation instruction says "if sources disagree" — harmless |
+| All cross-side chunks in Compare are flagged as conflicting | All chunks land in `=== DISPUTED ===`; side sections are empty — generation still valid but less structured |
+| `_llm_conflict_check` returns malformed JSON | `detect_conflicts` catches the exception and drops that pair — no crash, potential miss |
 | Decomposition returns only 1 sub-question (COMPLEX path) | Chain produces a single `=== STEP 1 ===` section, effectively equivalent to Aggregate |
 | LLM output is not valid JSON | `parse_llm_output()` falls back to raw text + cite all chunks |
 | LLM cites index out of bounds | Silently drop (bounds check in `filter_output()`) |
