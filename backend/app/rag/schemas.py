@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.llm.base import TokenUsage
+
 
 class RAGQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -10,10 +12,11 @@ class RAGQuery(BaseModel):
 
 
 class RAGSource(BaseModel):
-    title: str
-    section: str
+    doc_title: str
+    section_title: str
     source_file: str
     score: float
+    excerpt: str
 
 
 class RAGResponse(BaseModel):
@@ -22,4 +25,4 @@ class RAGResponse(BaseModel):
     sources: list[RAGSource]
     intent: str | None = None
     model: str | None = None
-    usage: dict | None = None
+    usage: TokenUsage | None = None

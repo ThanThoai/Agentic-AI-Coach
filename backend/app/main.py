@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.api.v1.router import router as v1_router
 from app.core.config import settings
 from app.core.logging import setup_logging
 
@@ -37,6 +38,9 @@ app.add_middleware(
 
 if settings.app_env == "production":
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_origins)
+
+
+app.include_router(v1_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["system"])
