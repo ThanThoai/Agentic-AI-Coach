@@ -301,14 +301,14 @@ results = await qdrant.search(
 
 **File:** `backend/app/rag/chunker.py`
 
-### Why a size guard is needed
+### Token thresholds
 
-Most H2 sections in these docs fit within 512 tokens. However, some are longer:
-- `14-workout-split-ppl.md` — the exercise list section can exceed 600 tokens
-- `18-common-injuries.md` — multiple injury descriptions in one section
-
-Sending an oversized chunk to the embedding API wastes tokens and may degrade
-retrieval quality (vectors of very long texts become less discriminative).
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `MIN_TOKENS` | 50 | Below this a chunk embeds poorly — too little signal |
+| `MAX_TOKENS` | 512 | Upper limit for `text-embedding-3-small` optimal range |
+| `OVERLAP_TOKENS` | 64 | Prevents context loss at split boundaries (~1–2 sentences) |
+| Tokeniser | `tiktoken` `cl100k_base` | Exact token count matching the embedding model |
 
 ### Algorithm
 
@@ -316,24 +316,168 @@ retrieval quality (vectors of very long texts become less discriminative).
 for each ParsedChunk:
     token_count = tiktoken.count(chunk.text)
 
-    if token_count ≤ MAX_TOKENS:
+    if token_count < MIN_TOKENS:
+        → too-short path  (see below)
+
+    elif token_count ≤ MAX_TOKENS:
         yield chunk as-is
 
     else:
-        split into sub-chunks with sliding window:
-            window  = MAX_TOKENS   tokens
-            overlap = OVERLAP_TOKENS tokens
-        each sub-chunk inherits all metadata from the parent
-        chunk_index becomes  f"{parent_index}.{sub_index}"
+        → too-long path  (see below)
 ```
 
-**Parameters:**
+---
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| `MAX_TOKENS` | 512 | Within optimal range for `text-embedding-3-small` |
-| `OVERLAP_TOKENS` | 64 | Prevents context loss at split boundaries |
-| Tokeniser | `tiktoken` `cl100k_base` | Same tokeniser used by OpenAI embedding model |
+### Edge case A — Section too short (< 50 tokens)
+
+**Problem:** A section with only a heading and 1–2 lines produces a vector with very
+little signal. It will match broadly and weakly, polluting search results.
+
+Known examples in this corpus:
+- `## Key Principle` in `08-progressive-overload.md` — single paragraph, ~40 tokens
+- `## Overview` synthetic sections (content before first H2) — often only 2–3 lines
+
+**Strategy: merge with the next sibling section**
+
+```
+if token_count < MIN_TOKENS:
+    buffer this chunk
+    on next iteration, prepend the buffered text to the current chunk
+    yield the merged chunk
+
+# Edge case within the edge case:
+# If the short chunk is the LAST section in a document,
+# merge it with the PREVIOUS chunk instead.
+```
+
+Merged chunk metadata: keep `section_title` of the **first** (shorter) section,
+append `" + {next_section_title}"` to make the boundary visible in the payload.
+
+```python
+# Example merge result
+ParsedChunk(
+    section_title = "Key Principle + (end of document)",
+    text          = "## Key Principle\n...\n\n## (merged content)",
+    chunk_index   = "4+5",   # signals a merge happened
+)
+```
+
+**Why not just skip short sections?**
+Skipping silently loses content. A short "Key Principle" section may be the most
+important summary sentence in the document — exactly what a user asking a high-level
+question needs.
+
+**Why 50 tokens as the floor?**
+50 tokens ≈ 2–3 sentences — the minimum amount of text for `text-embedding-3-small`
+to produce a useful directional vector. Empirically, vectors for texts shorter than
+this have cosine similarities of 0.4–0.6 with semantically unrelated content (noise).
+
+---
+
+### Edge case B — Section too long (> 512 tokens)
+
+**Problem:** Oversized chunks degrade embedding quality. Vectors of very long texts
+become less discriminative — they average over too many concepts and match too broadly.
+
+Known examples in this corpus:
+- `14-workout-split-ppl.md` — exercise list section can reach ~650 tokens
+- `18-common-injuries.md` — multiple injury blocks in one section can reach ~700 tokens
+
+**Strategy: sliding-window split**
+
+```python
+def split_oversized(chunk: ParsedChunk) -> list[ParsedChunk]:
+    tokens = tokenize(chunk.text)           # list of token ids
+    sub_chunks = []
+    start = 0
+    sub_index = 0
+
+    while start < len(tokens):
+        end = min(start + MAX_TOKENS, len(tokens))
+        window_text = detokenize(tokens[start:end])
+        sub_chunks.append(ParsedChunk(
+            text          = window_text,
+            chunk_index   = f"{chunk.chunk_index}.{sub_index}",
+            # all other fields inherited from parent:
+            doc_title     = chunk.doc_title,
+            section_title = chunk.section_title,
+            source_file   = chunk.source_file,
+            tags          = chunk.tags,
+            difficulty    = chunk.difficulty,
+            topic_type    = chunk.topic_type,
+        ))
+        if end == len(tokens):
+            break
+        start = end - OVERLAP_TOKENS        # step back for overlap
+        sub_index += 1
+
+    return sub_chunks
+```
+
+**Overlap behaviour:**
+The last `OVERLAP_TOKENS` (64) tokens of each window are repeated at the start of
+the next — ensuring a sentence cut at a boundary still fully appears in one of the
+two adjacent sub-chunks.
+
+**Multi-split (very long sections > 1024 tokens):**
+The `while` loop handles arbitrarily long sections — it keeps sliding until `end`
+reaches the final token, so a 900-token section produces two sub-chunks
+(`0.0` and `0.1`), a 1400-token section produces three (`0.0`, `0.1`, `0.2`), etc.
+
+---
+
+### Edge case C — Section that is almost entirely code or a table
+
+**Problem:** A section whose body is 90%+ a fenced code block or markdown table
+will produce a vector dominated by syntax tokens (`|`, `-`, `` ` ``, `{`, `}`).
+These vectors match poorly against natural-language queries.
+
+In this corpus the risk is low (fitness docs rarely have code), but some sections
+include structured data like exercise tables.
+
+**Strategy: detect and annotate, do not skip**
+
+```python
+def is_structured_content(text: str) -> bool:
+    lines = text.strip().splitlines()
+    code_or_table_lines = sum(
+        1 for l in lines
+        if l.startswith("```") or l.startswith("    ") or l.startswith("|")
+    )
+    return code_or_table_lines / max(len(lines), 1) > 0.6
+```
+
+If `is_structured_content` is true, add `"structured_content": true` to the Qdrant
+payload. The retriever can then de-prioritise these chunks (lower `score_threshold`
+weight) or apply a post-retrieval reranker that penalises structured-only results.
+
+Do **not** skip these chunks — a user asking "what exercises are in a PPL split?"
+needs the table content.
+
+---
+
+### Complete chunking decision tree
+
+```
+ParsedChunk
+     │
+     ├─ token_count < 50  ──► merge with next sibling
+     │                        (last section → merge with previous)
+     │
+     ├─ token_count ≤ 512 ──► yield as-is
+     │                        (annotate if mostly code/table)
+     │
+     └─ token_count > 512 ──► sliding-window split
+                               window=512, overlap=64
+                               sub-indexed as "{index}.0", "{index}.1", ...
+```
+
+### Ingest log with edge case reporting
+
+```
+[INFO] rag.chunker  total_parsed=104
+[INFO] rag.chunker  merged_short=3   split_long=4   structured=2   normal=95
+```
 
 ---
 
