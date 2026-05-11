@@ -542,11 +542,196 @@ shipping and adjust if the gap is < 0.05.
 
 ---
 
-## 4. Prompt construction
+### 3e. Deduplication + Re-ranking
 
-**File:** `backend/app/rag/retriever.py` (context builder) + `app/api/v1/rag.py`
+**File:** `backend/app/rag/retriever.py`
 
-The prompt has three parts: **system**, **context**, and **user question**.
+After parallel retrieval, the candidate pool contains chunks from multiple sub-query
+result lists. Two problems must be addressed before prompt assembly:
+
+1. **Duplicates** — the same chunk may appear in several sub-query results with
+   different scores. Keep it once, carrying the highest raw score.
+2. **Ranking quality** — sorting by max score across sub-queries is crude. A chunk
+   that ranked #1 in every sub-query's result list should score higher than a chunk
+   that ranked #1 in only one list at a marginally higher score.
+
+#### Reciprocal Rank Fusion (RRF) across sub-query results
+
+RRF promotes chunks that appear consistently across multiple sub-queries:
+
+```
+score_RRF(chunk) = Σ  1 / (k + rank_i(chunk))
+                  i∈sub_queries
+```
+
+`k = 60` is the standard smoothing constant. A chunk ranked #1 in two lists scores
+`2 / (60 + 1) ≈ 0.033`; a chunk ranked #1 in only one list scores `1 / 61 ≈ 0.016`.
+
+```python
+def rrf_merge(
+    results_per_query: list[list[SearchResult]],
+    k: int = 60,
+    final_limit: int = 5,
+    score_threshold: float = 0.35,
+) -> list[SearchResult]:
+    """RRF across multiple sub-query result lists. Deduplicates as a side-effect."""
+    rrf_scores: dict[str, float] = {}
+    by_id: dict[str, SearchResult] = {}
+
+    for results in results_per_query:
+        for rank, r in enumerate(results, start=1):
+            rrf_scores[r.id] = rrf_scores.get(r.id, 0.0) + 1.0 / (k + rank)
+            if r.id not in by_id or r.score > by_id[r.id].score:
+                by_id[r.id] = r  # keep for payload access; store best raw score
+
+    ranked_ids = sorted(
+        [cid for cid in by_id if by_id[cid].score >= score_threshold],
+        key=lambda cid: rrf_scores[cid],
+        reverse=True,
+    )
+    return [by_id[cid] for cid in ranked_ids[:final_limit]]
+```
+
+For **SIMPLE** queries (single sub-question), `results_per_query` has one list —
+RRF degenerates to a simple score sort, identical to what `parallel_hybrid_search`
+already does. No special-casing needed.
+
+#### Diversity filter
+
+For COMPLEX / COMPARISON queries, pure score-based ranking can flood the context
+with chunks from a single document, leaving little room for the second topic. The
+diversity filter caps the number of chunks from any one source file:
+
+```python
+def apply_diversity_filter(
+    chunks: list[SearchResult],
+    max_per_source: int = 2,
+) -> list[SearchResult]:
+    """
+    Prevent any single source document from occupying more than max_per_source
+    slots in the final context window.
+    Applied after RRF; order is preserved.
+    """
+    counts: dict[str, int] = {}
+    result: list[SearchResult] = []
+    for chunk in chunks:
+        src = chunk.payload.get("source_file", "")
+        if counts.get(src, 0) < max_per_source:
+            result.append(chunk)
+            counts[src] = counts.get(src, 0) + 1
+    return result
+```
+
+**When each step applies:**
+
+| Query type | Deduplication | RRF re-ranking | Diversity filter |
+|------------|--------------|---------------|-----------------|
+| `SIMPLE` | Not needed (1 list) | Score sort only | Not applied |
+| `COMPLEX` | Yes | Yes | Yes (`max_per_source=2`) |
+| `COMPARISON` | Yes | Yes | Yes (`max_per_source=2`) |
+
+---
+
+## 4. Context Assembly
+
+**File:** `backend/app/rag/retriever.py`
+
+Context assembly converts the ranked, deduplicated `SearchResult` list into a
+formatted string that fits within the prompt's token budget.
+
+### Token budget
+
+```python
+import tiktoken
+
+_TOKENIZER = tiktoken.get_encoding("cl100k_base")
+MAX_CONTEXT_TOKENS = 1200   # hard cap for the chunk block
+
+def _count_tokens(text: str) -> int:
+    return len(_TOKENIZER.encode(text))
+```
+
+| Component | Tokens | Cached? |
+|-----------|--------|---------|
+| System prompt | ~250 | Yes (Anthropic `cache_control: ephemeral`) |
+| Context block (up to 5 chunks) | ≤ 1 200 | No |
+| Multi-topic header (COMPLEX / COMPARISON) | +20 | No |
+| Synthesis instruction (COMPLEX / COMPARISON) | +25 | No |
+| User question | ~20 | No |
+| **Total** | **≤ 1 520** | |
+
+### Chunk formatting
+
+```python
+def _format_chunk(index: int, chunk: SearchResult) -> str:
+    p = chunk.payload
+    header = (
+        f"[{index}] Source: {p.get('doc_title', '?')} > "
+        f"{p.get('section_title', '?')} ({p.get('source_file', '?')})"
+    )
+    separator = "─" * 56
+    return f"{header}\n{separator}\n{p.get('text', '')}"
+```
+
+Rendered output:
+
+```
+[1] Source: Progressive Overload > Rate of Progression (08-progressive-overload.md)
+────────────────────────────────────────────────────────────────
+- Beginners: Can add weight almost every session (newbie gains)
+- Intermediate: Weekly or biweekly progression
+- Advanced: Monthly or per training block (mesocycle)
+
+[2] Source: Workout Splits > Push-Pull-Legs Structure (14-workout-split-ppl.md)
+────────────────────────────────────────────────────────────────
+A PPL split trains each muscle group twice per week with focused sessions...
+```
+
+### Assembly with token guard
+
+```python
+def assemble_context(
+    chunks: list[SearchResult],
+    query_type: QueryType,
+    max_tokens: int = MAX_CONTEXT_TOKENS,
+) -> tuple[str, list[SearchResult]]:
+    """
+    Format chunks into context string; trim to stay within max_tokens.
+    Returns (context_string, list_of_chunks_actually_included).
+    """
+    entries: list[str] = []
+    used: list[SearchResult] = []
+    total = 0
+
+    for i, chunk in enumerate(chunks, start=1):
+        entry = _format_chunk(i, chunk)
+        t = _count_tokens(entry)
+        if total + t > max_tokens:
+            break           # stop before exceeding budget
+        entries.append(entry)
+        used.append(chunk)
+        total += t
+
+    block = "\n\n".join(entries)
+
+    if query_type in ("COMPLEX", "COMPARISON"):
+        note = (
+            "Note: the following context covers multiple sub-topics related to "
+            "your question. Use all relevant sections when composing your answer.\n\n"
+        )
+        block = note + block
+
+    return block, used
+```
+
+Chunks are passed in **score-descending order** so the most relevant content is
+always included when the budget is tight and trailing chunks must be dropped.
+
+---
+
+## 5. Generation
+
+**File:** `backend/app/api/v1/rag.py`
 
 ### System prompt
 
@@ -564,65 +749,78 @@ Rules:
 5. Return your response as JSON: { "answer": "...", "cited_indices": [1, 3] }
 ```
 
-The system prompt is eligible for **Anthropic prompt caching** (`cache_control: ephemeral`).
-Since it never changes between requests, it will be cached after the first call,
-saving ~70% of system-prompt tokens on subsequent requests.
+Eligible for **Anthropic prompt caching** — the static system prompt is wrapped
+with `cache_control: ephemeral`, saving ~70 % of its tokens on repeat calls.
 
-### Context block
+### COMPLEX / COMPARISON synthesis instruction
 
-Each retrieved chunk is formatted with its index number and source attribution.
-For COMPLEX queries, a brief header notes that chunks may come from multiple topics:
-
-```
-[1] Source: Progressive Overload > Rate of Progression (08-progressive-overload.md)
-────────────────────────────────────────────────────────
-## Rate of Progression
-- Beginners: Can add weight almost every session (newbie gains)
-- Intermediate: Weekly or biweekly progression
-...
-
-[2] Source: Workout Splits > Push-Pull-Legs Structure (14-workout-split-ppl.md)
-────────────────────────────────────────────────────────
-## Push-Pull-Legs Structure
-A PPL split trains each muscle group twice per week...
-```
-
-Chunks are ordered **by score descending** so the LLM sees the most relevant
-information first.
-
-### Full prompt token estimate
-
-| Query type | Input tokens | Notes |
-|---|---|---|
-| SIMPLE (no rewrite) | ~1 270 | System ~250 + 5 chunks ~1 000 + question ~20 |
-| SIMPLE (rewritten) | ~1 300 | +30 tokens for the longer rewritten query |
-| COMPLEX / COMPARISON | ~1 300 | Same chunk budget; sub-questions folded into context header |
-
----
-
-## 5. LLM call
-
-**File:** `backend/app/api/v1/rag.py`
+For multi-topic queries, a synthesis instruction is appended to the system prompt
+before the context block. It tells the LLM to integrate evidence across topics
+rather than answering each sub-topic sequentially:
 
 ```python
-response = await llm_provider.complete(
-    messages = [LLMMessage(role="user", content=question)],
-    system   = full_system_with_context,
-    max_tokens  = 512,
-    temperature = 0.2,
+SYNTHESIS_INSTRUCTION = (
+    "\n\nThe context above covers multiple sub-topics. Synthesise a unified answer "
+    "that addresses all parts of the question. Cite sources for each distinct "
+    "sub-claim using [N] notation."
 )
 ```
 
-**Temperature 0.2:** RAG answers should be grounded and consistent, not creative.
-**max_tokens 512:** Fitness answers rarely exceed 400 tokens. Capping prevents runaway
-generation while leaving headroom for thorough answers.
+### Generation call
 
-For COMPLEX queries, the system prompt is augmented with a synthesis instruction:
+```python
+async def generate(
+    question: str,
+    context: str,
+    query_type: QueryType,
+    provider: BaseLLMProvider,
+) -> LLMResponse:
+    system = GENERATION_SYSTEM_PROMPT
+    if query_type in ("COMPLEX", "COMPARISON"):
+        system += SYNTHESIS_INSTRUCTION
+    full_system = system + "\n\n" + context
 
+    return await provider.complete(
+        messages=[LLMMessage(role="user", content=question)],
+        system=full_system,
+        max_tokens=512,
+        temperature=0.2,
+    )
 ```
-Note: the context above covers multiple sub-topics. Synthesise a unified answer
-that addresses all parts of the question, citing sources for each sub-claim.
+
+**temperature=0.2** — low for factual, grounded answers; higher values increase
+hallucination risk on RAG tasks.
+
+**max_tokens=512** — typical fitness answers run 200–400 tokens; 512 gives headroom
+for longer synthesis on COMPLEX queries without runaway generation.
+
+### Streaming variant
+
+For endpoints that stream the answer token-by-token (e.g. chat UI):
+
+```python
+async def generate_stream(
+    question: str,
+    context: str,
+    query_type: QueryType,
+    provider: BaseLLMProvider,
+) -> AsyncIterator[str]:
+    system = GENERATION_SYSTEM_PROMPT
+    if query_type in ("COMPLEX", "COMPARISON"):
+        system += SYNTHESIS_INSTRUCTION
+    full_system = system + "\n\n" + context
+
+    async for token in provider.stream(
+        messages=[LLMMessage(role="user", content=question)],
+        system=full_system,
+        max_tokens=512,
+        temperature=0.2,
+    ):
+        yield token
 ```
+
+Streaming does not change the prompt or parameters — only whether tokens are
+buffered and returned at once or yielded incrementally.
 
 ---
 
@@ -770,10 +968,13 @@ class RAGResponse(BaseModel):
 | Query decomposition | — | ~200 ms |
 | Embedding (asyncio.gather) | ~150 ms | ~150 ms (concurrent) |
 | Hybrid search (Qdrant) | ~10 ms | ~10 ms (concurrent, dominated by 1 call) |
+| Deduplication + RRF re-ranking | ~1 ms | ~2 ms |
+| Diversity filter | — | ~1 ms |
+| Context assembly (tiktoken) | ~5 ms | ~5 ms |
 | Guardrail Layer 2 (if triggered) | ~200 ms | ~200 ms |
 | LLM generation | ~800 ms | ~1 000 ms (longer synthesis) |
 | Layer 3 output filter | ~5 ms | ~5 ms |
-| **Total (p50 estimate)** | **~1 100 ms** | **~1 500 ms** |
+| **Total (p50 estimate)** | **~1 110 ms** | **~1 515 ms** |
 
 Embedding is the dominant non-LLM cost. Parallel retrieval keeps it flat regardless
 of how many sub-questions are produced by decomposition.
@@ -819,7 +1020,10 @@ Client        API Route     QueryProcessor    Retriever       Qdrant       Haiku
   │               │               │               │ hybrid_search (×N concurrent)        │
   │               │               │               │─────────────►│            │          │
   │               │               │               │◄─────────────│            │          │
-  │               │               │               │ merge+dedup  │            │          │
+  │               │               │               │ rrf_merge +  │            │          │
+  │               │               │               │ diversity    │            │          │
+  │               │               │               │ filter       │            │          │
+  │               │               │               │ assemble_context()        │          │
   │               │  chunks[]     │               │              │            │          │
   │               │◄──────────────────────────────│              │            │          │
   │               │                                                            │          │
@@ -843,6 +1047,9 @@ Client        API Route     QueryProcessor    Retriever       Qdrant       Haiku
 | Decomposition returns > 3 sub-questions | Truncate to first 3 |
 | Decomposition returns 1 sub-question | Treat as SIMPLE path |
 | All parallel searches return 0 results | Return out-of-scope response |
+| RRF produces 0 chunks after score threshold filter | Return out-of-scope response (same path as zero search results) |
 | Merged result count < 2 | Return what was found, no error |
+| Diversity filter reduces pool to < 2 chunks | Return the filtered chunks as-is; 1 chunk is still useful |
+| First chunk alone exceeds context budget | Include first chunk only — `assemble_context()` breaks on first iteration |
 | LLM output is not valid JSON | `parse_llm_output()` falls back to raw text + cite all chunks |
 | LLM cites index out of bounds | Silently drop (bounds check in `filter_output()`) |
