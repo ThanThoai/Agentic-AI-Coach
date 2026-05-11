@@ -3,3 +3,6 @@
 !.claude/command/README.md
 knowledge-base/*
 sample-data/*
+
+*.pyc
+.env.test

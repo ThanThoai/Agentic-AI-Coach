@@ -19,6 +19,9 @@ dependencies = [
     "google-generativeai>=0.7",  # Gemini
     # Vector database
     "qdrant-client>=1.10",
+    # RAG pipeline
+    "tiktoken>=0.7",
+    "fastembed>=0.3",
     # Cache
     "redis[hiredis]>=5.0",
     # HTTP client (for custom provider integrations)
@@ -47,6 +50,9 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

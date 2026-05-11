@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
+    # Knowledge base
+    knowledge_base_path: str = "../knowledge-base"
+
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: SecretStr | None = None

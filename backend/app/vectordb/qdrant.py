@@ -7,9 +7,14 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    Fusion,
+    FusionQuery,
     MatchValue,
     PointStruct,
+    Prefetch,
     ScoredPoint,
+    SparseVector,
+    SparseVectorParams,
     VectorParams,
 )
 
@@ -83,17 +88,17 @@ class QdrantVectorDB:
                 ]
             )
 
-        hits: list[ScoredPoint] = await self._client.search(
+        result = await self._client.query_points(
             collection_name=self.collection,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit,
-            score_threshold=score_threshold,
+            score_threshold=score_threshold if score_threshold > 0.0 else None,
             query_filter=query_filter,
             with_payload=True,
         )
         return [
             SearchResult(id=str(h.id), score=h.score, payload=h.payload or {})
-            for h in hits
+            for h in result.points
         ]
 
     async def delete(self, ids: list[str]) -> None:
@@ -107,3 +112,93 @@ class QdrantVectorDB:
     async def count(self) -> int:
         result = await self._client.count(collection_name=self.collection)
         return result.count
+
+    # ------------------------------------------------------------------
+    # Hybrid collection helpers (dense + sparse named vectors)
+    # ------------------------------------------------------------------
+
+    async def ensure_collection_hybrid(self, dense_size: int = 1536) -> None:
+        """Create a hybrid collection with 'dense' + 'sparse' named vectors if absent."""
+        existing = {c.name for c in (await self._client.get_collections()).collections}
+        if self.collection not in existing:
+            await self._client.create_collection(
+                collection_name=self.collection,
+                vectors_config={"dense": VectorParams(size=dense_size, distance=Distance.COSINE)},
+                sparse_vectors_config={"sparse": SparseVectorParams()},
+            )
+
+    async def recreate_collection_hybrid(self, dense_size: int = 1536) -> None:
+        """Delete and recreate the hybrid collection. Use when schema changes."""
+        existing = {c.name for c in (await self._client.get_collections()).collections}
+        if self.collection in existing:
+            await self._client.delete_collection(collection_name=self.collection)
+        await self._client.create_collection(
+            collection_name=self.collection,
+            vectors_config={"dense": VectorParams(size=dense_size, distance=Distance.COSINE)},
+            sparse_vectors_config={"sparse": SparseVectorParams()},
+        )
+
+    async def upsert_hybrid(
+        self,
+        dense_vectors: list[list[float]],
+        sparse_vectors: list[SparseVector],
+        payloads: list[dict[str, Any]],
+        ids: list[str] | None = None,
+    ) -> list[str]:
+        """Upsert points with both named dense and sparse vectors."""
+        point_ids = ids or [str(uuid4()) for _ in dense_vectors]
+        points = [
+            PointStruct(
+                id=pid,
+                vector={"dense": dense, "sparse": sparse},
+                payload=payload,
+            )
+            for pid, dense, sparse, payload in zip(
+                point_ids, dense_vectors, sparse_vectors, payloads
+            )
+        ]
+        await self._client.upsert(collection_name=self.collection, points=points, wait=True)
+        return point_ids
+
+    async def hybrid_search(
+        self,
+        dense_vector: list[float],
+        sparse_vector: SparseVector,
+        limit: int = 5,
+        prefetch_limit: int = 20,
+        filter_by: dict[str, Any] | None = None,
+    ) -> list[SearchResult]:
+        """RRF-fused hybrid search over dense + sparse named vectors."""
+        query_filter: Filter | None = None
+        if filter_by:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(key=k, match=MatchValue(value=v))
+                    for k, v in filter_by.items()
+                ]
+            )
+
+        results = await self._client.query_points(
+            collection_name=self.collection,
+            prefetch=[
+                Prefetch(
+                    query=dense_vector,
+                    using="dense",
+                    limit=prefetch_limit,
+                    filter=query_filter,
+                ),
+                Prefetch(
+                    query=sparse_vector,
+                    using="sparse",
+                    limit=prefetch_limit,
+                    filter=query_filter,
+                ),
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),
+            limit=limit,
+            with_payload=True,
+        )
+        return [
+            SearchResult(id=str(p.id), score=p.score, payload=p.payload or {})
+            for p in results.points
+        ]
