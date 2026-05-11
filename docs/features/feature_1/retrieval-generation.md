@@ -7,32 +7,44 @@
 
 ## Responsibility
 
-This component owns the **online, per-request pipeline**: embedding the user's question,
+This component owns the **online, per-request pipeline**: processing the user's question,
 searching Qdrant for relevant chunks, assembling a prompt, calling the LLM, and formatting
 the final response with source citations.
+
+Simple questions go through a direct path. Complex, multi-faceted, or comparison questions
+are routed through Query Decomposition and Parallel Retrieval before reaching the LLM.
 
 ```
 POST /api/v1/rag/query  { "question": "..." }
           │
-          ▼  retriever.py
-  Embed question         ← same model used during ingestion
+          ▼  Layer 1 guardrails (hard-block, rate limit)
           │
-          ▼
-  Qdrant search          ← top-5 chunks, score ≥ 0.35
-          │
-          ├─ 0 results ──►  guardrails.py  (out-of-scope, no LLM call)
-          │
-          ▼  rag.py (route handler)
-  Build prompt
-          │
-          ▼
-  LLM call               ← structured JSON output
-          │
-          ▼
-  Map cited_indices → Qdrant payloads
-          │
-          ▼
-  RAGResponse JSON
+          ▼  query_processor.py
+  ┌───────────────────────────────────────────┐
+  │             Query Processing              │
+  │  Classification → Rewriting/Decomposition │
+  └───────────────────────────────────────────┘
+          │                │
+     SIMPLE path      COMPLEX/COMPARISON path
+          │                │
+          ▼                ▼ (parallel)
+  single rewritten    sub-questions × hybrid search
+  hybrid search           │
+          │           Merge + deduplicate
+          └──────────────►│
+                          ▼
+                  top-5 chunks (score ≥ 0.35)
+                          │
+                ├─ 0 results ──► out-of-scope
+                          │
+                          ▼
+                  Build prompt + LLM call
+                          │
+                          ▼
+                  Layer 3 output filter
+                          │
+                          ▼
+                     RAGResponse
 ```
 
 ---
@@ -51,65 +63,384 @@ async def embed_query(question: str, provider: BaseLLMProvider) -> list[float]:
     return vectors[0]
 ```
 
-The active embedding model is recorded in a Qdrant collection alias or a metadata point
-at ingest time. The retriever validates on startup that the configured model matches
-what was used to build the index.
+No contextual prefix is added to query embeddings (unlike ingestion, which uses
+`"Document: X | Section: Y | ..."` — see chunking-embedding.md). The asymmetry is
+intentional: the model learns to align bare questions with prefixed passage vectors.
 
 ---
 
-## 2. Vector search
+## 2. Query processing
+
+**File:** `backend/app/rag/query_processor.py`
+
+Raw questions often underperform in retrieval:
+- **Short queries** miss synonyms and domain vocabulary
+- **Multi-part questions** spread their signal across topics — no single vector captures all sub-intents
+- **Comparison questions** need independent evidence for each option
+
+Query processing resolves these problems before any vector search happens.
+
+### 2a. Query Classification
+
+Classification decides which retrieval path to take.
+
+```
+             ┌───────────────────────────────────────────────────┐
+             │              Query Classification                  │
+             │                                                    │
+             │   SIMPLE      →  rewrite → single hybrid search   │
+             │   COMPLEX     →  decompose → parallel search       │
+             │   COMPARISON  →  decompose → parallel search       │
+             └───────────────────────────────────────────────────┘
+```
+
+**Step 1 — heuristics (0 ms, 0 tokens):** catch clear-cut cases before any LLM call.
+
+```python
+import re
+from typing import Literal
+
+QueryType = Literal["SIMPLE", "COMPLEX", "COMPARISON"]
+
+_COMPARISON_SIGNALS = re.compile(
+    r"\b(vs\.?|versus|compare|comparison|difference between|better than|which is better|"
+    r"or\b.{3,40}\bor\b)\b",
+    re.IGNORECASE,
+)
+_COMPLEXITY_SIGNALS = re.compile(
+    r"\b(and (also|how|what|when|why)|both .{3,30} and|additionally|as well as|"
+    r"at the same time|while also)\b",
+    re.IGNORECASE,
+)
+
+def classify_query_heuristic(question: str) -> QueryType | None:
+    """Fast heuristic pre-filter. Returns None when LLM classification is needed."""
+    if _COMPARISON_SIGNALS.search(question):
+        return "COMPARISON"
+    if len(question) > 120 and _COMPLEXITY_SIGNALS.search(question):
+        return "COMPLEX"
+    if len(question) <= 80:
+        return "SIMPLE"   # short questions rarely need decomposition
+    return None           # ambiguous — escalate to LLM
+```
+
+**Step 2 — LLM classifier (invoked only when heuristics return `None`):**
+
+```
+You are a fitness question classifier. Classify the query as exactly one of:
+
+  SIMPLE      — Single focused question answerable from one topic area.
+                Examples: "How do I bench press?", "What is RPE?"
+
+  COMPLEX     — Multi-part question requiring information from more than one
+                topic. Look for conjunctions joining distinct sub-questions.
+                Examples: "What split should I use and how much volume per muscle?"
+
+  COMPARISON  — Asks to evaluate or contrast two or more options.
+                Examples: "PPL vs Upper/Lower for hypertrophy?",
+                          "Is creatine better than beta-alanine?"
+
+Return JSON only: {"type": "SIMPLE" | "COMPLEX" | "COMPARISON", "reason": "<one sentence>"}
+
+Query: {question}
+```
+
+```python
+async def classify_query(
+    question: str,
+    provider: BaseLLMProvider,
+    *,
+    model: str | None = None,
+) -> QueryType:
+    fast = classify_query_heuristic(question)
+    if fast is not None:
+        return fast
+    resp = await provider.complete(
+        messages=[LLMMessage(role="user", content=question)],
+        system=QUERY_CLASSIFIER_SYSTEM_PROMPT,
+        max_tokens=60,
+        temperature=0.0,
+        model=model,
+    )
+    try:
+        data = json.loads(_extract_json_block(resp.content))
+        t = data.get("type", "SIMPLE")
+        return t if t in ("SIMPLE", "COMPLEX", "COMPARISON") else "SIMPLE"
+    except Exception:
+        return "SIMPLE"   # fail-safe: degrade to simple path
+```
+
+**Cost:** heuristics cover ~70% of queries at 0 cost. LLM classification costs ~60 tokens
+(~$0.000048 with Haiku) and is only invoked for the remaining ~30%.
+
+---
+
+### 2b. Query Rewriting
+
+Applied to **SIMPLE** queries — rewrites the user's raw question into a richer search
+string that improves recall by expanding abbreviations, adding synonyms, and surfacing
+implicit domain context.
+
+```
+Input:  "bench press stall"
+Output: "bench press plateau strength stall not progressing barbell chest powerlifting"
+
+Input:  "best PPL"
+Output: "Push Pull Legs PPL workout split program structure frequency hypertrophy strength"
+```
+
+**Why rewriting helps:**
+- Users write in natural language; the corpus uses domain-specific terminology
+- Short queries (< 60 chars) miss many semantically related chunks
+- Expansion increases the chance the sparse (BM25) component finds term-level matches
+
+```
+You are a search query optimizer for a fitness coaching knowledge base.
+Rewrite the user's question into a richer search query:
+- Expand abbreviations (PPL → Push Pull Legs, OHP → overhead press, RDL → Romanian deadlift)
+- Add fitness synonyms and related terms (hypertrophy → muscle growth, volume)
+- Make implicit context explicit ("bench press" → "bench press barbell technique form chest")
+- Keep the rewrite under 150 characters
+
+Return only the rewritten query string, no explanation, no quotes.
+
+Question: {question}
+```
+
+```python
+async def rewrite_query(
+    question: str,
+    provider: BaseLLMProvider,
+    *,
+    model: str | None = None,
+) -> str:
+    resp = await provider.complete(
+        messages=[LLMMessage(role="user", content=question)],
+        system=QUERY_REWRITE_SYSTEM_PROMPT,
+        max_tokens=80,
+        temperature=0.0,
+        model=model,
+    )
+    rewritten = resp.content.strip().strip('"')
+    # Guard: if rewrite looks broken (empty or too long), fall back to original
+    if not rewritten or len(rewritten) > 300:
+        return question
+    return rewritten
+```
+
+**Cost:** ~80 tokens per call (~$0.000064 with Haiku). Skip rewriting for questions
+already > 80 chars — they are verbose enough to provide good recall on their own.
+
+---
+
+### 2c. Query Decomposition
+
+Applied to **COMPLEX** and **COMPARISON** queries — breaks the question into 2–3
+focused sub-questions that can each be retrieved independently.
+
+```
+Input:  "What's the best workout split for hypertrophy and how much volume
+         should I do per muscle group per week?"
+Output: [
+  "best workout split for hypertrophy PPL upper lower full body",
+  "optimal training volume sets per muscle group per week hypertrophy"
+]
+
+Input:  "Is PPL or Upper/Lower better for an intermediate lifter?"
+Output: [
+  "Push Pull Legs PPL program intermediate lifter pros cons",
+  "Upper Lower split intermediate lifter benefits structure"
+]
+```
+
+```
+You are a query decomposer for a fitness coaching knowledge base.
+Break the user's question into 2–3 focused sub-questions.
+
+Rules:
+- Each sub-question must be independently answerable
+- Expand abbreviations in each sub-question
+- For COMPARISON questions, create one sub-question per option being compared
+- Do not produce more than 3 sub-questions
+
+Return JSON only: {"sub_questions": ["...", "...", "..."]}
+
+Question: {question}
+```
+
+```python
+async def decompose_query(
+    question: str,
+    provider: BaseLLMProvider,
+    *,
+    model: str | None = None,
+) -> list[str]:
+    resp = await provider.complete(
+        messages=[LLMMessage(role="user", content=question)],
+        system=QUERY_DECOMPOSE_SYSTEM_PROMPT,
+        max_tokens=200,
+        temperature=0.0,
+        model=model,
+    )
+    try:
+        data = json.loads(_extract_json_block(resp.content))
+        subs = [s.strip() for s in data.get("sub_questions", []) if s.strip()]
+        if 1 <= len(subs) <= 3:
+            return subs
+    except Exception:
+        pass
+    return [question]   # fall back to original question as a single sub-query
+```
+
+**Cost:** ~200 tokens per call (~$0.00016 with Haiku). Only invoked for COMPLEX /
+COMPARISON queries (~20% of traffic by rough estimate).
+
+---
+
+### 2d. Combined query processing entry point
+
+```python
+async def process_query(
+    question: str,
+    provider: BaseLLMProvider,
+    *,
+    classifier_model: str | None = None,
+    rewrite_model: str | None = None,
+) -> tuple[QueryType, list[str]]:
+    """
+    Classify the query and return (query_type, list_of_search_strings).
+    SIMPLE  → [rewritten_question]
+    COMPLEX / COMPARISON → [sub_q1, sub_q2, ...]
+    """
+    query_type = await classify_query(question, provider, model=classifier_model)
+
+    if query_type == "SIMPLE":
+        rewritten = await rewrite_query(question, provider, model=rewrite_model)
+        return query_type, [rewritten]
+
+    sub_questions = await decompose_query(question, provider, model=rewrite_model)
+    return query_type, sub_questions
+```
+
+---
+
+## 3. Retrieval
 
 **File:** `backend/app/rag/retriever.py`
 
-```python
-results: list[SearchResult] = await qdrant.search(
-    query_vector = question_embedding,
-    limit        = 5,
-    score_threshold = 0.35,
-)
-```
+### 3a. Hybrid search (single query)
 
-### Parameters
-
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| `limit` | 5 | Provides enough context without overloading the prompt; the top-5 chunks for fitness questions are typically all from closely related sections |
-| `score_threshold` | 0.35 | Empirical floor for meaningful topical overlap; see calibration note below |
-
-### Score threshold calibration
-
-The threshold of **0.35** is a conservative starting estimate based on the expected
-distribution of cosine similarity scores:
-
-```
-Clearly in-scope questions vs fitness corpus:    score ≈ 0.45 – 0.85
-Ambiguous / general health questions:            score ≈ 0.30 – 0.50
-Completely off-topic (weather, coding, etc.):    score ≈ 0.05 – 0.25
-```
-
-Before the feature ships, run a calibration exercise:
-1. Prepare 15 in-scope questions (expected to return results)
-2. Prepare 10 out-of-scope questions (expected to return nothing)
-3. Record max similarity score for each query against the indexed corpus
-4. Choose threshold = midpoint of the gap between the two distributions
-
-If the gap is small (< 0.05), fall back to the LLM-only out-of-scope strategy (guardrails layer 2).
-
-### What `SearchResult` contains
+Each search string goes through hybrid dense + sparse RRF retrieval (see
+`QdrantVectorDB.hybrid_search`):
 
 ```python
-@dataclass
-class SearchResult:
-    id:      str
-    score:   float
-    payload: dict   # source_file, doc_title, section_title, chunk_index, text
+from app.rag.sparse import build_sparse_vector
+
+async def hybrid_search_one(
+    query_str: str,
+    provider: BaseLLMProvider,
+    qdrant: QdrantVectorDB,
+    limit: int = 5,
+    score_threshold: float = 0.35,
+) -> list[SearchResult]:
+    dense_vec = await embed_query(query_str, provider)
+    sparse_vec = build_sparse_vector(query_str)
+    return await qdrant.hybrid_search(
+        dense_vector=dense_vec,
+        sparse_vector=sparse_vec,
+        limit=limit,
+        prefetch_limit=20,
+    )
 ```
+
+### 3b. Parallel retrieval (multiple sub-queries)
+
+For COMPLEX and COMPARISON queries, all sub-queries run concurrently:
+
+```python
+import asyncio
+
+async def parallel_hybrid_search(
+    sub_questions: list[str],
+    provider: BaseLLMProvider,
+    qdrant: QdrantVectorDB,
+    limit_per_query: int = 5,
+    final_limit: int = 5,
+    score_threshold: float = 0.35,
+) -> list[SearchResult]:
+    # Sparse vectors are CPU-only (fastembed BM25) — build synchronously
+    sparse_vecs = [build_sparse_vector(q) for q in sub_questions]
+    # Embed all sub-questions concurrently (each call hits the embedding API)
+    dense_vecs: list[list[float]] = await asyncio.gather(
+        *[embed_query(q, provider) for q in sub_questions]
+    )
+
+    # Run all hybrid searches concurrently
+    results_per_query: list[list[SearchResult]] = await asyncio.gather(*[
+        qdrant.hybrid_search(
+            dense_vector=dense,
+            sparse_vector=sparse,
+            limit=limit_per_query,
+        )
+        for dense, sparse in zip(dense_vecs, sparse_vecs)
+    ])
+
+    # Merge, deduplicate by chunk id, sort by best score seen
+    best_score: dict[str, float] = {}
+    by_id: dict[str, SearchResult] = {}
+    for results in results_per_query:
+        for r in results:
+            if r.id not in best_score or r.score > best_score[r.id]:
+                best_score[r.id] = r.score
+                by_id[r.id] = r
+
+    merged = sorted(by_id.values(), key=lambda r: r.score, reverse=True)
+    return [r for r in merged if r.score >= score_threshold][:final_limit]
+```
+
+**Why concurrent embedding matters:** embedding API calls take ~100–200 ms each.
+Running 3 sub-questions sequentially = 300–600 ms. Running them with `asyncio.gather`
+collapses that to ~100–200 ms — the latency of a single call.
+
+### 3c. Unified retrieval entry point
+
+```python
+async def retrieve(
+    sub_questions: list[str],
+    query_type: QueryType,
+    provider: BaseLLMProvider,
+    qdrant: QdrantVectorDB,
+    max_sources: int = 5,
+) -> list[SearchResult]:
+    if query_type == "SIMPLE":
+        return await hybrid_search_one(
+            sub_questions[0], provider, qdrant, limit=max_sources
+        )
+    return await parallel_hybrid_search(
+        sub_questions, provider, qdrant,
+        limit_per_query=max_sources,
+        final_limit=max_sources,
+    )
+```
+
+### 3d. Score threshold calibration
+
+| Query type | Expected score range (in-scope) | Expected score range (off-topic) |
+|------------|--------------------------------|----------------------------------|
+| Direct term match | 0.55 – 0.85 | — |
+| Paraphrase / synonym | 0.40 – 0.65 | — |
+| Off-topic (weather, coding) | — | 0.05 – 0.25 |
+| Ambiguous general health | 0.25 – 0.45 | — |
+
+Threshold **0.35** sits at the boundary between ambiguous health and off-topic.
+Calibrate with a 30-question labelled set (20 in-scope, 10 out-of-scope) before
+shipping and adjust if the gap is < 0.05.
 
 ---
 
-## 3. Prompt construction
+## 4. Prompt construction
 
-**File:** `backend/app/rag/retriever.py` (context builder) + `app/api/v1/rag.py` (assembler)
+**File:** `backend/app/rag/retriever.py` (context builder) + `app/api/v1/rag.py`
 
 The prompt has three parts: **system**, **context**, and **user question**.
 
@@ -135,48 +466,37 @@ saving ~70% of system-prompt tokens on subsequent requests.
 
 ### Context block
 
-Each retrieved chunk is formatted with its index number and source attribution:
+Each retrieved chunk is formatted with its index number and source attribution.
+For COMPLEX queries, a brief header notes that chunks may come from multiple topics:
 
 ```
 [1] Source: Progressive Overload > Rate of Progression (08-progressive-overload.md)
 ────────────────────────────────────────────────────────
 ## Rate of Progression
-- **Beginners**: Can add weight almost every session (newbie gains)
-- **Intermediate**: Weekly or biweekly progression
-- **Advanced**: Monthly or per training block (mesocycle)
-
-[2] Source: Progressive Overload > Double Progression Method (08-progressive-overload.md)
-────────────────────────────────────────────────────────
-## Double Progression Method
-A practical approach for most trainees:
-1. Pick a rep range (e.g., 8-12 reps)
+- Beginners: Can add weight almost every session (newbie gains)
+- Intermediate: Weekly or biweekly progression
 ...
+
+[2] Source: Workout Splits > Push-Pull-Legs Structure (14-workout-split-ppl.md)
+────────────────────────────────────────────────────────
+## Push-Pull-Legs Structure
+A PPL split trains each muscle group twice per week...
 ```
 
 Chunks are ordered **by score descending** so the LLM sees the most relevant
-information first. Experiments with GPT and Claude show that information position
-matters — highest-relevance content placed first consistently yields better answers.
-
-### User question
-
-```
-Question: How often should a beginner add weight to their lifts?
-```
+information first.
 
 ### Full prompt token estimate
 
-```
-System prompt:    ~250 tokens (cached after first call)
-5 context chunks: ~200 tokens each = ~1000 tokens
-User question:    ~20 tokens
-─────────────────────────────
-Total input:      ~1270 tokens
-Cached (Anthropic): ~1250 tokens saved on repeat calls
-```
+| Query type | Input tokens | Notes |
+|---|---|---|
+| SIMPLE (no rewrite) | ~1 270 | System ~250 + 5 chunks ~1 000 + question ~20 |
+| SIMPLE (rewritten) | ~1 300 | +30 tokens for the longer rewritten query |
+| COMPLEX / COMPARISON | ~1 300 | Same chunk budget; sub-questions folded into context header |
 
 ---
 
-## 4. LLM call
+## 5. LLM call
 
 **File:** `backend/app/api/v1/rag.py`
 
@@ -185,19 +505,24 @@ response = await llm_provider.complete(
     messages = [LLMMessage(role="user", content=question)],
     system   = full_system_with_context,
     max_tokens  = 512,
-    temperature = 0.2,   # low temperature for factual, grounded answers
+    temperature = 0.2,
 )
 ```
 
 **Temperature 0.2:** RAG answers should be grounded and consistent, not creative.
-Low temperature reduces hallucination risk and produces more deterministic outputs.
+**max_tokens 512:** Fitness answers rarely exceed 400 tokens. Capping prevents runaway
+generation while leaving headroom for thorough answers.
 
-**max_tokens 512:** Fitness answers rarely need more than 300–400 tokens. Capping at
-512 prevents runaway generation while leaving headroom for thorough answers.
+For COMPLEX queries, the system prompt is augmented with a synthesis instruction:
+
+```
+Note: the context above covers multiple sub-topics. Synthesise a unified answer
+that addresses all parts of the question, citing sources for each sub-claim.
+```
 
 ---
 
-## 5. Response parsing and source mapping
+## 6. Response parsing and source mapping
 
 The LLM is expected to return JSON:
 
@@ -211,25 +536,17 @@ The LLM is expected to return JSON:
 ### Parsing strategy
 
 ```python
-import json, re
-
-def parse_llm_output(raw: str, chunks: list[SearchResult]) -> tuple[str, list[int]]:
-    # Attempt JSON parse
+def parse_llm_output(raw: str, num_chunks: int) -> tuple[str, list[int]]:
     try:
         data = json.loads(raw.strip())
-        return data["answer"], data.get("cited_indices", [])
-    except (json.JSONDecodeError, KeyError):
-        # Fallback: treat entire response as answer, cite all chunks conservatively
-        return raw.strip(), list(range(1, len(chunks) + 1))
+        return data["answer"], [int(i) for i in data.get("cited_indices", [])]
+    except (json.JSONDecodeError, KeyError, ValueError):
+        return raw.strip(), list(range(1, num_chunks + 1))
 ```
 
-The fallback is **conservative**: it attributes all retrieved chunks as sources rather
-than dropping attribution entirely. This is safer than claiming no sources were used.
+The fallback is conservative: cite all retrieved chunks rather than claiming no sources.
 
 ### Index → source mapping
-
-`cited_indices` uses **1-based numbering** matching the `[N]` labels in the prompt.
-The API layer maps each cited index back to the corresponding `SearchResult` payload:
 
 ```python
 cited_sources = [
@@ -251,7 +568,7 @@ results, preventing hallucinated citations.
 
 ---
 
-## 6. API contract
+## 7. API contract
 
 ### Request
 
@@ -261,8 +578,8 @@ Authorization: Bearer <token>
 Content-Type: application/json
 
 {
-  "question":    "How do I progress on bench press as an intermediate lifter?",
-  "max_sources": 5    // optional, default 5, max 5
+  "question":    "What's the difference between PPL and Upper/Lower for hypertrophy?",
+  "max_sources": 5
 }
 ```
 
@@ -270,29 +587,30 @@ Content-Type: application/json
 
 ```json
 {
-  "answer": "As an intermediate lifter, expect to progress weekly or biweekly [1]. The double progression method works well: pick a rep range (e.g., 8–12), add reps each session until you hit the ceiling, then increase the weight [2].",
+  "answer": "PPL trains each muscle group twice per week with focused sessions [1]. Upper/Lower also hits each muscle twice but pairs antagonist muscle groups [2]. For hypertrophy, both are effective; PPL gives more per-session volume per muscle, while Upper/Lower improves recovery balance [1][2].",
   "in_scope": true,
+  "intent": "COMPARISON",
   "sources": [
     {
-      "doc_title":     "Progressive Overload",
-      "section_title": "Rate of Progression",
-      "source_file":   "08-progressive-overload.md",
-      "score":         0.82,
-      "excerpt":       "Intermediate: Weekly or biweekly progression..."
+      "doc_title":     "Workout Splits",
+      "section_title": "Push-Pull-Legs Structure",
+      "source_file":   "14-workout-split-ppl.md",
+      "score":         0.81,
+      "excerpt":       "A PPL split trains each muscle group twice per week..."
     },
     {
-      "doc_title":     "Progressive Overload",
-      "section_title": "Double Progression Method",
-      "source_file":   "08-progressive-overload.md",
+      "doc_title":     "Workout Splits",
+      "section_title": "Upper/Lower Structure",
+      "source_file":   "14-workout-split-ppl.md",
       "score":         0.76,
-      "excerpt":       "A practical approach for most trainees: Pick a rep range..."
+      "excerpt":       "Upper/Lower pairs push and pull movements..."
     }
   ],
-  "model":   "claude-sonnet-4-6",
+  "model": "claude-sonnet-4-6",
   "usage": {
-    "prompt_tokens":      612,
-    "completion_tokens":  118,
-    "cache_read_tokens":  590
+    "prompt_tokens":      1320,
+    "completion_tokens":  148,
+    "cache_read_tokens":  1280
   }
 }
 ```
@@ -303,6 +621,7 @@ Content-Type: application/json
 {
   "answer":   "I can only answer questions about fitness, training, and nutrition. Your question appears to be outside that scope.",
   "in_scope": false,
+  "intent":   null,
   "sources":  [],
   "model":    null,
   "usage":    null
@@ -312,8 +631,6 @@ Content-Type: application/json
 ### Pydantic schemas
 
 ```python
-# app/schemas/rag.py
-
 class RAGQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
     question:    str = Field(min_length=3, max_length=1000)
@@ -329,6 +646,7 @@ class RAGSource(BaseModel):
 class RAGResponse(BaseModel):
     answer:   str
     in_scope: bool
+    intent:   str | None       # SIMPLE / COMPLEX / COMPARISON
     sources:  list[RAGSource]
     model:    str | None
     usage:    TokenUsage | None
@@ -336,27 +654,91 @@ class RAGResponse(BaseModel):
 
 ---
 
-## 7. Request flow sequence diagram
+## 8. Latency and cost breakdown
+
+### Per-request latency (typical)
+
+| Step | SIMPLE path | COMPLEX / COMPARISON path |
+|------|------------|--------------------------|
+| Query classification (heuristic) | ~0 ms | ~0 ms |
+| Query classification (LLM) | 0 ms (heuristic hit) | ~150 ms (30% of requests) |
+| Query rewriting | ~150 ms | — |
+| Query decomposition | — | ~200 ms |
+| Embedding (asyncio.gather) | ~150 ms | ~150 ms (concurrent) |
+| Hybrid search (Qdrant) | ~10 ms | ~10 ms (concurrent, dominated by 1 call) |
+| Guardrail Layer 2 (if triggered) | ~200 ms | ~200 ms |
+| LLM generation | ~800 ms | ~1 000 ms (longer synthesis) |
+| Layer 3 output filter | ~5 ms | ~5 ms |
+| **Total (p50 estimate)** | **~1 100 ms** | **~1 500 ms** |
+
+Embedding is the dominant non-LLM cost. Parallel retrieval keeps it flat regardless
+of how many sub-questions are produced by decomposition.
+
+### Per-request token cost (Haiku for processing, Sonnet for generation)
+
+| Step | Tokens | Cost (Haiku) |
+|------|--------|-------------|
+| Query classification (LLM, 30% of requests) | ~60 | ~$0.000048 × 0.3 = $0.000014 |
+| Query rewriting (SIMPLE, ~70% of requests) | ~80 | ~$0.000064 × 0.7 = $0.000045 |
+| Query decomposition (COMPLEX, ~20%) | ~200 | ~$0.00016 × 0.2 = $0.000032 |
+| Layer 2 guardrails (10% of requests) | ~150 | ~$0.00012 × 0.1 = $0.000012 |
+| **Processing subtotal (avg)** | | **~$0.0001** |
+| LLM generation (Sonnet, every request) | ~1 300 in + ~150 out | ~$0.006 |
+| **Total per request (avg)** | | **~$0.006** |
+
+---
+
+## 9. Full request flow sequence diagram
 
 ```
-Client          API Route       Retriever       Qdrant          LLM
-  │                 │               │               │              │
-  │  POST /query    │               │               │              │
-  │────────────────►│               │               │              │
-  │                 │ embed_query() │               │              │
-  │                 │──────────────►│               │              │
-  │                 │               │  search()     │              │
-  │                 │               │──────────────►│              │
-  │                 │               │  results[]    │              │
-  │                 │               │◄──────────────│              │
-  │                 │  chunks[]     │               │              │
-  │                 │◄──────────────│               │              │
-  │                 │                                              │
-  │                 │  complete(system+context+question)           │
-  │                 │─────────────────────────────────────────────►│
-  │                 │  { answer, cited_indices }                   │
-  │                 │◄─────────────────────────────────────────────│
-  │                 │                                              │
-  │  RAGResponse    │                                              │
-  │◄────────────────│                                              │
+Client        API Route     QueryProcessor    Retriever       Qdrant       Haiku     Sonnet
+  │               │               │               │              │            │          │
+  │  POST /query  │               │               │              │            │          │
+  │──────────────►│               │               │              │            │          │
+  │               │ classify()    │               │              │            │          │
+  │               │──────────────►│               │              │            │          │
+  │               │               │── heuristic ──┤              │            │          │
+  │               │               │   (or Haiku)──┼──────────────┼───────────►│          │
+  │               │               │               │              │◄───────────│          │
+  │               │               │               │              │  type      │          │
+  │               │ rewrite() or  │               │              │            │          │
+  │               │ decompose()   │               │              │            │          │
+  │               │──────────────►│───────────────┼──────────────┼───────────►│          │
+  │               │               │               │              │◄───────────│          │
+  │               │               │  sub_questions│              │            │          │
+  │               │               │               │              │            │          │
+  │               │  retrieve()   │               │              │            │          │
+  │               │──────────────────────────────►│              │            │          │
+  │               │               │               │ embed (×N concurrent)     │          │
+  │               │               │               │──────────────┼───────────►│          │
+  │               │               │               │◄─────────────┼────────────│          │
+  │               │               │               │ hybrid_search (×N concurrent)        │
+  │               │               │               │─────────────►│            │          │
+  │               │               │               │◄─────────────│            │          │
+  │               │               │               │ merge+dedup  │            │          │
+  │               │  chunks[]     │               │              │            │          │
+  │               │◄──────────────────────────────│              │            │          │
+  │               │                                                            │          │
+  │               │  complete(system+context+question)                                   │
+  │               │──────────────────────────────────────────────────────────────────────►│
+  │               │  { answer, cited_indices }                                            │
+  │               │◄──────────────────────────────────────────────────────────────────────│
+  │               │                                                                       │
+  │  RAGResponse  │                                                                       │
+  │◄──────────────│                                                                       │
 ```
+
+---
+
+## 10. Failure modes and fallbacks
+
+| Failure | Fallback |
+|---------|---------|
+| Query classification LLM timeout | Default to `SIMPLE` — safe degradation, no user impact |
+| Query rewriting returns empty/malformed | Use original question as-is |
+| Decomposition returns > 3 sub-questions | Truncate to first 3 |
+| Decomposition returns 1 sub-question | Treat as SIMPLE path |
+| All parallel searches return 0 results | Return out-of-scope response |
+| Merged result count < 2 | Return what was found, no error |
+| LLM output is not valid JSON | `parse_llm_output()` falls back to raw text + cite all chunks |
+| LLM cites index out of bounds | Silently drop (bounds check in `filter_output()`) |
