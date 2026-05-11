@@ -9,8 +9,8 @@
 
 This component owns the **offline ingestion pipeline**: reading raw markdown files,
 splitting them into semantically meaningful chunks, enriching each chunk with structured
-metadata, generating vector embeddings (with contextual prefixes), and storing everything
-in Qdrant.
+metadata, generating both dense and sparse vector embeddings, and storing everything
+in Qdrant with hybrid search support.
 
 ```
 knowledge-base/*.md
@@ -18,17 +18,21 @@ knowledge-base/*.md
       ▼  parser.py
   ParsedChunk[]              ← one chunk per H2 section
       │
-      ▼  metadata.py          ← NEW
+      ▼  metadata.py
   ParsedChunk + metadata     ← tags, difficulty, topic_type extracted
       │
       ▼  chunker.py
-  Chunk[]                    ← oversized sections split further
+  Chunk[]                    ← edge-case handled (short/long/structured)
       │
-      ▼  embedder.py          ← NEW: contextual prefix applied here
-  (embed_text, vector)[]     ← 1536-dimensional float vectors
-      │
-      ▼  ingestion.py
-  Qdrant upsert              ← idempotent, deterministic IDs, rich payload
+      ├──────────────────────────────────────────────────┐
+      ▼  embedder.py                                     ▼  sparse.py
+  dense vector[]             ←  contextual prefix    sparse vector[]  ← BM25
+  (1536-dim float)               applied first       (indices, values)
+      │                                                   │
+      └──────────────────────┬───────────────────────────┘
+                             ▼  ingestion.py
+                    Qdrant upsert (named vectors: "dense" + "sparse")
+                    idempotent, deterministic IDs, rich payload
 ```
 
 ---
@@ -584,7 +588,7 @@ Delta: +3,120 tokens ≈ +$0.0001  — negligible cost, significant retrieval ga
 
 ---
 
-## 5. Embedding model
+## 5. Dense embedding model
 
 **File:** `backend/app/rag/embedder.py`
 
@@ -602,14 +606,191 @@ fixed at collection creation time.
 
 ---
 
-## 6. Qdrant ingestion
+## 6. Sparse embedding — BM25 hybrid search
+
+**File:** `backend/app/rag/sparse.py`
+
+### Why add sparse on top of dense
+
+Dense embedding captures *semantic meaning* — excellent for paraphrase and conceptual
+queries. It has a known blind spot: **exact keyword matching**. In this fitness corpus,
+several query types suffer:
+
+| Query type | Example | Dense weakness |
+|---|---|---|
+| Abbreviations | `"1RM"`, `"RPE 8"`, `"RIR 2"` | Abbreviations embed poorly — the model has little signal for 3-letter tokens |
+| Set/rep schemes | `"5x5"`, `"3x10"` | Numeric patterns have no semantic embedding |
+| Exact exercise names | `"Romanian Deadlift"` | Partial match; no guarantee the exact name is in the top-5 |
+| Technical terms | `"mesocycle"`, `"AMRAP"` | Rare tokens → undertrained representations |
+
+BM25 (sparse embedding) is the complementary technique: it scores by **term frequency
+and inverse document frequency** — if the query token appears in the chunk, it scores
+high regardless of semantic distance. Dense + sparse together cover each other's blind spots.
+
+---
+
+### Resource cost of `Qdrant/bm25`
+
+This is the most important question for the decision to adopt.
+
+**`fastembed` with `Qdrant/bm25` is extremely lightweight:**
+
+| Resource | Cost | Detail |
+|---|---|---|
+| **API calls** | Zero | Runs entirely local — no network request, no billing |
+| **GPU** | Not required | Pure statistical algorithm (TF-IDF), CPU only |
+| **Model download** | One-time ~10 MB | Vocabulary + tokenizer weights, cached to disk after first run |
+| **RAM at ingest** | ~80–120 MB | BM25 vocabulary loaded into memory during the ingest run only |
+| **RAM at query time** | ~80–120 MB | Model stays loaded while the FastAPI process is alive |
+| **CPU per chunk** | ~0.5–1 ms | Tokenization + TF-IDF scoring, negligible vs network I/O |
+| **Qdrant storage per chunk** | ~1–3 KB | Sparse vector has 20–150 non-zero terms × 8 bytes; dense is 6 KB — sparse adds ~30% |
+
+**Comparison against dense embedding:**
+
+```
+Dense (text-embedding-3-small, 104 chunks):
+  API call latency:  ~800 ms total  (3 batches × ~250 ms)
+  API cost:          ~$0.0005
+  GPU:               not needed (API-side)
+
+Sparse (Qdrant/bm25, 104 chunks):
+  Computation time:  ~50 ms total   (104 × ~0.5 ms, local CPU)
+  API cost:          $0.00  ← zero
+  GPU:               not needed
+```
+
+The sparse step adds **~50 ms** to the ingest pipeline and **zero ongoing cost**.
+For a corpus of 120 chunks, this is negligible.
+
+---
+
+### How `Qdrant/bm25` works
+
+`fastembed`'s `SparseTextEmbedding` with the `Qdrant/bm25` model implements **BM25+**
+(an improved variant of BM25 that adds a lower-bound floor to term scores):
+
+```
+score(term t, document d) =
+    IDF(t) × [ (k1 + 1) × tf(t,d) ]
+              ─────────────────────────────────── + δ
+              k1 × (1 − b + b × |d|/avgdl) + tf(t,d)
+
+where:
+    tf(t, d)  = term frequency of t in document d
+    IDF(t)    = log((N − df(t) + 0.5) / (df(t) + 0.5) + 1)
+    |d|       = document length in tokens
+    avgdl     = average document length across corpus
+    k1 = 1.5, b = 0.75, δ = 1  (BM25+ constants)
+```
+
+The output is a **sparse vector**: only terms that appear in the chunk have non-zero
+values. A typical fitness chunk produces 20–150 non-zero dimensions out of a vocabulary
+of ~50,000 tokens.
+
+```python
+from fastembed import SparseTextEmbedding
+from qdrant_client.models import SparseVector
+
+sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
+
+def build_sparse_vector(text: str) -> SparseVector:
+    # embed() returns a generator; we take the first (and only) result
+    result = next(sparse_model.embed([text]))
+    return SparseVector(
+        indices=result.indices.tolist(),
+        values=result.values.tolist(),
+    )
+```
+
+**No prefix for sparse:** Unlike dense embedding, BM25 does not benefit from the
+contextual prefix — sparse scoring is purely term-overlap based. The raw `chunk.text`
+is passed directly.
+
+---
+
+### Hybrid search with RRF fusion
+
+At query time, both vectors are computed and Qdrant merges the result lists using
+**Reciprocal Rank Fusion (RRF)**:
+
+```
+RRF score = Σ  1 / (k + rank_i)    where k = 60  (Qdrant default)
+
+Example — chunk ranked #2 by dense, #1 by sparse:
+  score = 1/(60+2) + 1/(60+1) = 0.0161 + 0.0164 = 0.0325
+
+Example — chunk ranked #1 by dense, not in sparse top-20:
+  score = 1/(60+1) + 0 = 0.0164
+```
+
+RRF is **rank-based, not score-based** — it does not require normalising cosine
+similarity against BM25 scores, which use incompatible scales. This makes it robust
+without any tuning parameter.
+
+```python
+# backend/app/rag/retriever.py
+from qdrant_client.models import Prefetch, FusionQuery, Fusion, NamedVector, NamedSparseVector
+
+results = await client.query_points(
+    collection_name = "knowledge_base",
+    prefetch = [
+        Prefetch(
+            query = dense_vector,                       # list[float]
+            using = "dense",
+            limit = 20,                                 # over-fetch before fusion
+        ),
+        Prefetch(
+            query = SparseVector(indices=..., values=...),
+            using = "sparse",
+            limit = 20,
+        ),
+    ],
+    query  = FusionQuery(fusion=Fusion.RRF),
+    limit  = 5,                                         # final top-5 after fusion
+    with_payload = True,
+)
+```
+
+---
+
+### When hybrid beats dense-only
+
+| Query | Dense rank | Sparse rank | Hybrid rank |
+|---|---|---|---|
+| "how to increase 1RM" | #3 | #1 (exact "1RM") | **#1** |
+| "RPE 8 on squat" | #4 | #1 (exact "RPE") | **#1** |
+| "what is progressive overload" | #1 | #2 | **#1** |
+| "muscles worked in Romanian Deadlift" | #2 | #1 (exact match) | **#1** |
+| "how does sleep affect muscle growth" | #1 (semantic) | #8 (few exact terms) | **#1** |
+
+---
+
+## 7. Qdrant ingestion
 
 **File:** `backend/app/rag/ingestion.py`
 
-### Collection setup
+### Collection setup — named vectors (dense + sparse)
+
+The collection must declare both vector spaces. Once created, the configuration
+is immutable — use `--force-recreate` if the vector layout needs to change.
 
 ```python
-await qdrant.ensure_collection(vector_size=1536, distance=Distance.COSINE)
+from qdrant_client.models import (
+    VectorParams, SparseVectorParams, Distance,
+    VectorsConfig, SparseVectorsConfig,
+)
+
+await client.create_collection(
+    collection_name = "knowledge_base",
+    vectors_config = VectorsConfig(
+        # named dense vector
+        dense = VectorParams(size=1536, distance=Distance.COSINE),
+    ),
+    sparse_vectors_config = SparseVectorsConfig(
+        # named sparse vector — no size needed, indices are dynamic
+        sparse = SparseVectorParams(),
+    ),
+)
 ```
 
 ### Payload schema (updated with metadata)
@@ -633,6 +814,31 @@ Each Qdrant point now carries the full metadata alongside the chunk content:
 > `text` stores the **original chunk text without the prefix** — the LLM receives clean
 > content when the chunk is used as context during generation.
 
+### Upsert with both named vectors
+
+```python
+from qdrant_client.models import PointStruct, NamedVector, NamedSparseVector
+
+point = PointStruct(
+    id      = chunk_id(chunk.source_file, chunk.chunk_index),
+    vector  = {
+        "dense":  dense_vector,    # list[float], 1536 dims, embedded with prefix
+        "sparse": sparse_vector,   # SparseVector, from BM25, no prefix
+    },
+    payload = {
+        "source_file":   chunk.source_file,
+        "doc_title":     chunk.doc_title,
+        "section_title": chunk.section_title,
+        "chunk_index":   chunk.chunk_index,
+        "text":          chunk.text,       # raw text, no prefix
+        "topic_type":    chunk.topic_type,
+        "difficulty":    chunk.difficulty,
+        "tags":          chunk.tags,
+    },
+)
+await client.upsert(collection_name="knowledge_base", points=[point])
+```
+
 ### Idempotency via deterministic IDs
 
 ```python
@@ -652,7 +858,7 @@ uv run python -m app.rag.ingest
 # Force delete + recreate collection (use after structural doc changes or embedding model change)
 uv run python -m app.rag.ingest --force-recreate
 
-# Ingest a single file (useful during development)
+# Ingest a single file
 uv run python -m app.rag.ingest --file knowledge-base/08-progressive-overload.md
 ```
 
@@ -660,62 +866,87 @@ uv run python -m app.rag.ingest --file knowledge-base/08-progressive-overload.md
 
 ```
 [INFO] rag.ingest  docs_found=20 chunks_parsed=104
-[INFO] rag.ingest  metadata_extracted=20 strategy=rule_based llm_fallback=0
-[INFO] rag.ingest  embedding_batches=3 tokens_used=23920
-[INFO] rag.ingest  upserted=104 skipped=0 collection=knowledge_base duration_ms=4380
+[INFO] rag.ingest  metadata_extracted=20  strategy=rule_based  llm_fallback=0
+[INFO] rag.ingest  dense_batches=3  dense_tokens=23920  dense_cost_usd=~0.0005
+[INFO] rag.ingest  sparse_chunks=104  sparse_time_ms=52  sparse_api_cost_usd=0.00
+[INFO] rag.ingest  upserted=104  skipped=0  collection=knowledge_base  duration_ms=4430
 ```
 
 ---
 
-## 7. Full data flow diagram
+## 8. Full data flow diagram
 
 ```
  knowledge-base/08-progressive-overload.md
           │
           ▼  parse_document()
  ParsedChunk(
-   text          = "## Methods of Progressive Overload\n...",
-   doc_title     = "Progressive Overload",
-   section_title = "Methods of Progressive Overload",
-   source_file   = "08-progressive-overload.md",
-   chunk_index   = "2",
-   tags=[], difficulty=[], topic_type=""    ← not yet filled
+   text="## Methods of Progressive Overload\n...",
+   doc_title="Progressive Overload",
+   section_title="Methods of Progressive Overload",
+   source_file="08-progressive-overload.md",
+   chunk_index="2",
+   tags=[], difficulty=[], topic_type=""    ← empty, not yet filled
  )
           │
           ▼  extract_metadata()
- ParsedChunk(
-   ...same fields...,
-   tags          = ["progressive_overload", "strength", "hypertrophy"],
-   difficulty    = ["beginner", "intermediate", "advanced"],
-   topic_type    = "programming"
+ ParsedChunk( ...same...,
+   tags=["progressive_overload","strength","hypertrophy"],
+   difficulty=["beginner","intermediate","advanced"],
+   topic_type="programming"
  )
           │
           ▼  split_if_oversized()
- Chunk (same fields, chunk_index may become "2.0", "2.1" if split)
+ Chunk  (chunk_index may become "2.0", "2.1" if the section was oversized)
 
           │
-          ▼  build_embed_text()        ← contextual prefix applied
- embed_text =
-   "Document: Progressive Overload | Section: Methods of Progressive Overload |
-    Type: programming | Tags: progressive_overload, strength, hypertrophy
-
-    ## Methods of Progressive Overload
-    ..."
-
-          │
-          ▼  provider.embed([embed_text])
- vector = [0.021, -0.043, ..., 0.017]   # 1536 floats
-
-          │
-          ▼  qdrant.upsert(id, vector, payload)
+          ├─────────────────────────────────────────────────────────┐
+          │  DENSE PATH                                             │  SPARSE PATH
+          ▼  build_embed_text()   ← prefix added                   ▼  build_sparse_vector()
+                                                                       ← raw text, no prefix
+ embed_text =                                                       BM25 tokenise + score
+   "Document: Progressive Overload |                               → ~80 non-zero terms
+    Section: Methods of ... |
+    Type: programming |
+    Tags: progressive_overload, ..."
+          │                                                          │
+          ▼  provider.embed([embed_text])  ← API call (~250 ms)     ▼  local CPU  (~0.5 ms, $0)
+ dense_vector = [0.021, -0.043, ..., 0.017]   # 1536 floats        sparse_vector = SparseVector(
+                                                                      indices=[423, 1021, ...],
+                                                                      values=[2.3, 1.8, ...]
+                                                                    )
+          │                                                          │
+          └──────────────────────┬──────────────────────────────────┘
+                                 ▼  qdrant.upsert()
  Qdrant point:
-   id      = "a3f2...uuid...7d01"       ← deterministic from sha256
-   vector  = [...]                      ← embedded WITH prefix
-   payload = {
-     source_file, doc_title, section_title, chunk_index,
-     text,           ← stored WITHOUT prefix (clean for LLM)
-     topic_type,     ← "programming"
-     difficulty,     ← ["beginner", "intermediate", "advanced"]
-     tags            ← ["progressive_overload", "strength", "hypertrophy"]
+   id      = "a3f2...uuid...7d01"        ← sha256(source_file + chunk_index)
+   vector  = {
+     "dense":  [0.021, ...]              ← 1536 floats, embedded WITH prefix
+     "sparse": SparseVector(...)         ← BM25 scores, raw text
    }
+   payload = {
+     source_file   = "08-progressive-overload.md"
+     doc_title     = "Progressive Overload"
+     section_title = "Methods of Progressive Overload"
+     chunk_index   = "2"
+     text          = "## Methods of Progressive Overload\n..."  ← no prefix, clean for LLM
+     topic_type    = "programming"
+     difficulty    = ["beginner", "intermediate", "advanced"]
+     tags          = ["progressive_overload", "strength", "hypertrophy"]
+   }
+
+
+─────────────── QUERY TIME ─────────────────────────────────────────────
+
+ question = "how often should I add weight to 1RM lifts?"
+          │
+          ├─────────────────────────────────────────────────────────┐
+          ▼  provider.embed([question])                             ▼  build_sparse_vector(question)
+ q_dense = [0.031, ...]                                           q_sparse = SparseVector(
+                                                                    indices=[1RM_idx, ...],
+                                                                    values=[2.1, ...]
+                                                                  )
+          └──────────────────────┬──────────────────────────────────┘
+                                 ▼  Qdrant prefetch + RRF fusion
+ top-5 results  (dense rank + sparse rank fused via RRF score = Σ 1/(60+rank))
 ```
