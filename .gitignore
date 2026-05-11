@@ -1,0 +1,5 @@
+.claude/command/*
+!.claude/command/.gitkeep
+!.claude/command/README.md
+knowledge-base/*
+sample-data/*
