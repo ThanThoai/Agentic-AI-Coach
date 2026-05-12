@@ -1,3 +1,5 @@
+from openai import AsyncOpenAI
+
 from app.llm.openai import OpenAIProvider
 
 
@@ -9,15 +11,11 @@ class OpenRouterProvider(OpenAIProvider):
     def __init__(
         self,
         api_key: str,
-        default_model: str = "anthropic/claude-3.5-sonnet",
+        default_model: str = "anthropic/claude-sonnet-4-5",
         base_url: str = "https://openrouter.ai/api/v1",
         site_url: str = "http://localhost:3000",
         site_name: str = "CoachAgent",
     ) -> None:
-        # OpenRouter requires extra headers for attribution
-        import httpx
-        from openai import AsyncOpenAI
-
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -27,4 +25,6 @@ class OpenRouterProvider(OpenAIProvider):
             },
         )
         self._default_model = default_model
-        self._embedding_model = "openai/text-embedding-3-small"
+        # OpenRouter does not support the embeddings API —
+        # use DEFAULT_EMBEDDING_PROVIDER=openai alongside this provider.
+        self._embedding_model = ""

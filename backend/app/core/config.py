@@ -91,10 +91,16 @@ class Settings(BaseSettings):
 
     # OpenRouter
     openrouter_api_key: SecretStr | None = None
-    openrouter_default_model: str = "anthropic/claude-3.5-sonnet"
+    openrouter_default_model: str = "anthropic/claude-sonnet-4-5"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_site_url: str = "http://localhost:3000"
     openrouter_site_name: str = "CoachAgent"
+    # Per-step model defaults when using OpenRouter (overrides rag_*_model when set)
+    openrouter_guardrail_model: str = "anthropic/claude-haiku-4-5"
+    openrouter_classifier_model: str = "anthropic/claude-haiku-4-5"
+    openrouter_rewrite_model: str = "anthropic/claude-haiku-4-5"
+    openrouter_conflict_model: str = "anthropic/claude-haiku-4-5"
+    openrouter_generation_model: str = "anthropic/claude-sonnet-4-5"
 
     @field_validator("jwt_secret", mode="before")
     @classmethod

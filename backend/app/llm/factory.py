@@ -63,8 +63,8 @@ def get_default_embedder(cfg: Settings = _default_settings) -> BaseLLMProvider:
 # Steps sharing the same resolved provider reuse the same cached instance.
 
 @lru_cache
-def _cached_provider(provider: LLMProvider, cfg: Settings) -> BaseLLMProvider:
-    return build_provider(provider, cfg)
+def _cached_provider(provider: LLMProvider) -> BaseLLMProvider:
+    return build_provider(provider, _default_settings)
 
 
 def get_step_provider(
@@ -73,11 +73,17 @@ def get_step_provider(
 ) -> BaseLLMProvider:
     """Return a cached provider for a pipeline step, falling back to default."""
     resolved = step_provider or cfg.default_llm_provider
-    return _cached_provider(resolved, cfg)
+    return _cached_provider(resolved)
 
 
 class PipelineProviders:
-    """All per-step providers resolved from config. Used as a FastAPI dependency."""
+    """All per-step providers resolved from config. Used as a FastAPI dependency.
+
+    Model resolution priority (highest → lowest):
+      1. RAG_<STEP>_MODEL env var (explicit override)
+      2. openrouter_<step>_model defaults (when effective provider is OpenRouter)
+      3. Provider's own default_model
+    """
 
     def __init__(self, cfg: Settings = _default_settings) -> None:
         self.guardrail  = get_step_provider(cfg.rag_guardrail_provider,  cfg)
@@ -85,11 +91,24 @@ class PipelineProviders:
         self.rewrite    = get_step_provider(cfg.rag_rewrite_provider,    cfg)
         self.conflict   = get_step_provider(cfg.rag_conflict_provider,   cfg)
         self.generation = get_step_provider(cfg.rag_generation_provider, cfg)
-        self.embedder   = get_default_embedder(cfg)
+        self.embedder   = get_default_embedder()
 
-        # Per-step model overrides (None → provider falls back to its default_model)
-        self.guardrail_model  = cfg.rag_guardrail_model
-        self.classifier_model = cfg.rag_classifier_model
-        self.rewrite_model    = cfg.rag_rewrite_model
-        self.conflict_model   = cfg.rag_conflict_model
-        self.generation_model = cfg.rag_generation_model
+        self.guardrail_model  = self._resolve_model(cfg.rag_guardrail_model,  cfg.rag_guardrail_provider,  cfg.openrouter_guardrail_model,  cfg)
+        self.classifier_model = self._resolve_model(cfg.rag_classifier_model, cfg.rag_classifier_provider, cfg.openrouter_classifier_model, cfg)
+        self.rewrite_model    = self._resolve_model(cfg.rag_rewrite_model,    cfg.rag_rewrite_provider,    cfg.openrouter_rewrite_model,    cfg)
+        self.conflict_model   = self._resolve_model(cfg.rag_conflict_model,   cfg.rag_conflict_provider,   cfg.openrouter_conflict_model,   cfg)
+        self.generation_model = self._resolve_model(cfg.rag_generation_model, cfg.rag_generation_provider, cfg.openrouter_generation_model, cfg)
+
+    @staticmethod
+    def _resolve_model(
+        explicit: str | None,
+        step_provider: LLMProvider | None,
+        openrouter_default: str,
+        cfg: Settings,
+    ) -> str | None:
+        if explicit:
+            return explicit
+        effective = step_provider or cfg.default_llm_provider
+        if effective == LLMProvider.OPENROUTER:
+            return openrouter_default
+        return None
