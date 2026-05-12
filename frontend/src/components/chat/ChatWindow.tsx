@@ -308,9 +308,7 @@ export function ChatWindow() {
             </div>
             <h1 className="text-2xl font-semibold text-neutral-900">Coach Agent</h1>
             <p className="mt-2 text-sm text-neutral-500 max-w-xs mx-auto leading-relaxed">
-              {isCoach
-                ? "AI-powered coaching — analyze athletes and get training insights."
-                : "Ask anything about training, nutrition, and programming."}
+              Ask anything about training, nutrition, and programming.
             </p>
           </div>
 
@@ -344,7 +342,7 @@ export function ChatWindow() {
           <p className={`mt-4 text-center text-xs text-neutral-300 transition-opacity duration-300 ${
             isTyping ? "opacity-0" : "opacity-100"
           }`}>
-            Enter to send · Shift+Enter for new line{!isCoach && " · / to switch mode"}
+            Enter to send · Shift+Enter for new line · / to switch mode
           </p>
         </div>
       </div>
@@ -420,7 +418,7 @@ export function ChatWindow() {
                 isCoach={isCoach}
               />
               <p className="mt-2 text-center text-xs text-neutral-300">
-                Enter to send · Shift+Enter for new line{!isCoach && " · / to switch mode"}
+                Enter to send · Shift+Enter for new line · / to switch mode
               </p>
             </div>
           </footer>
@@ -456,15 +454,15 @@ const AGENT_EXAMPLES = [
 ];
 
 function LandingExamples({
-  onExample, disabled, activeMode, isCoach,
+  onExample, disabled, activeMode,
 }: {
   onExample: (q: string, mode: CommandMode) => void;
   disabled: boolean;
   activeMode: CommandMode;
   isCoach: boolean;
 }) {
-  const effectiveMode: CommandMode = isCoach ? "agent" : activeMode;
-  const examples = isCoach ? AGENT_EXAMPLES : activeMode === "analysis" ? ANALYSIS_EXAMPLES : RAG_EXAMPLES;
+  const effectiveMode = activeMode;
+  const examples = activeMode === "agent" ? AGENT_EXAMPLES : activeMode === "analysis" ? ANALYSIS_EXAMPLES : RAG_EXAMPLES;
 
   return (
     <div className="space-y-2">
