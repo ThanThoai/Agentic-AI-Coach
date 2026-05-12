@@ -6,6 +6,7 @@ dependencies = [
     # Web framework
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    "gunicorn>=22.0",
     # Validation & config
     "pydantic>=2.7",
     "pydantic-settings>=2.3",

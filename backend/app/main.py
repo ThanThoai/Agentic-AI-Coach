@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 import structlog
 from fastapi import FastAPI
@@ -37,7 +38,10 @@ app.add_middleware(
 )
 
 if settings.app_env == "production":
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_origins)
+    # Extract hostnames from CORS origins; always allow localhost for Docker health checks
+    _hosts = {urlparse(o).hostname for o in settings.allowed_origins if o != "*" and o}
+    _hosts |= {"localhost", "127.0.0.1"}
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(_hosts))
 
 
 app.include_router(v1_router, prefix="/api/v1")
