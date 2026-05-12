@@ -1,4 +1,5 @@
 import type { WorkoutAnalysisResponse } from "@/types/chat";
+import { extractApiMessage } from "./errors";
 
 const API_BASE = "";
 
@@ -32,12 +33,11 @@ export async function analyzeWorkout(
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({})) as Record<string, unknown>;
-    const msg =
-      typeof err.detail === "string"
-        ? err.detail
-        : `Request failed with status ${res.status}`;
-    throw new WorkoutError(res.status, msg);
+    const errBody = await res.json().catch(() => ({}));
+    throw new WorkoutError(
+      res.status,
+      extractApiMessage(errBody, `Request failed (${res.status})`),
+    );
   }
 
   return res.json() as Promise<WorkoutAnalysisResponse>;

@@ -79,6 +79,29 @@ function finaliseRAGSteps(steps: PipelineStep[], response: RAGResponse): Pipelin
   });
 }
 
+function toFriendlyMessage(status: number, raw: string, mode: CommandMode): string {
+  switch (status) {
+    case 401:
+      return "Your session has expired. Please refresh the page and try again.";
+    case 403:
+      return mode === "agent"
+        ? "Only coach accounts can use Agent Assist. Please switch to the coach account."
+        : "You don't have permission for this action.";
+    case 422:
+      return "Your request couldn't be processed. Try rephrasing your question.";
+    case 429:
+      return "Too many requests — please wait a moment before trying again.";
+    case 502:
+    case 503:
+    case 504:
+      return "The service is temporarily unavailable. Please try again in a moment.";
+    default:
+      if (status >= 500) return "Something went wrong on our end. Please try again.";
+      // For other codes use the API message if it's meaningful
+      return raw && !raw.startsWith("Request failed") ? raw : "Something went wrong. Please try again.";
+  }
+}
+
 export function ChatWindow() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -199,12 +222,15 @@ export function ChatWindow() {
     } catch (err) {
       timersRef.current.forEach(clearTimeout);
       let msg = "Something went wrong. Please try again.";
-      if (err instanceof RAGError) msg = `Error ${err.status}: ${err.message}`;
-      else if (err instanceof WorkoutError) msg = `Error ${err.status}: ${err.message}`;
-      else if (err instanceof AgentError) msg = `Agent error ${err.status}: ${err.message}`;
+      let code: number | undefined;
+      if (err instanceof RAGError || err instanceof WorkoutError || err instanceof AgentError) {
+        code = err.status;
+        msg = toFriendlyMessage(err.status, err.message, mode);
+      }
       updateMessage(assistantId, {
         content: "",
         error: msg,
+        errorCode: code,
         pipelineSteps: initialSteps(labels).map(s => ({ ...s, status: "done" })),
         isLoading: false,
       });

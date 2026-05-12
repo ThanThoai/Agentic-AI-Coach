@@ -149,4 +149,5 @@ export interface Message {
   pipelineSteps?: PipelineStep[];
   isLoading?: boolean;
   error?: string;
+  errorCode?: number;
 }

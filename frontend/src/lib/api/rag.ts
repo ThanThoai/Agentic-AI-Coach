@@ -1,7 +1,6 @@
 import type { RAGResponse, RAGSource, TokenUsage, PipelineTrace } from "@/types/chat";
+import { extractApiMessage } from "./errors";
 
-// Use relative URL so requests go through Next.js rewrite proxy → no CORS.
-// next.config.mjs forwards /api/* to the backend.
 const API_BASE = "";
 
 export class RAGError extends Error {
@@ -26,10 +25,7 @@ export async function queryRAG(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new RAGError(
-      res.status,
-      body?.error?.message ?? `Request failed with status ${res.status}`,
-    );
+    throw new RAGError(res.status, extractApiMessage(body, `Request failed (${res.status})`));
   }
 
   return res.json() as Promise<RAGResponse>;
@@ -63,10 +59,7 @@ export async function queryRAGStream(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new RAGError(
-      res.status,
-      body?.error?.message ?? `Request failed with status ${res.status}`,
-    );
+    throw new RAGError(res.status, extractApiMessage(body, `Request failed (${res.status})`));
   }
 
   const reader = res.body!.getReader();
