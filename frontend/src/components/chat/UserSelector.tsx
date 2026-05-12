@@ -9,9 +9,10 @@ interface UserSelectorProps {
   loading: boolean;
 }
 
-const USER_META: Record<string, { color: string; bg: string; emoji: string }> = {
-  alex: { color: "text-indigo-300", bg: "bg-indigo-600", emoji: "💪" },
-  binh: { color: "text-emerald-300", bg: "bg-emerald-600", emoji: "🏃" },
+const USER_META: Record<string, { color: string; bg: string; emoji: string; label?: string }> = {
+  alex:  { color: "text-indigo-300",  bg: "bg-indigo-600",  emoji: "💪" },
+  binh:  { color: "text-emerald-300", bg: "bg-emerald-600", emoji: "🏃" },
+  coach: { color: "text-purple-200",  bg: "bg-purple-700",  emoji: "🎯", label: "Coach" },
 };
 
 export function UserSelector({ users, activeKey, onSelect, loading }: UserSelectorProps) {
@@ -21,6 +22,7 @@ export function UserSelector({ users, activeKey, onSelect, loading }: UserSelect
       {users.map((user) => {
         const meta = USER_META[user.key] ?? { color: "text-gray-300", bg: "bg-gray-600", emoji: "👤" };
         const isActive = user.key === activeKey;
+        const isCoach = user.role === "coach";
         return (
           <button
             key={user.key}
@@ -34,10 +36,16 @@ export function UserSelector({ users, activeKey, onSelect, loading }: UserSelect
                 ? `${meta.bg} text-white shadow-md ring-2 ring-white/20`
                 : "bg-white/8 text-gray-400 hover:bg-white/12 hover:text-gray-200"
               }
+              ${isCoach ? "border border-purple-500/30" : ""}
             `}
           >
             <span className="text-sm leading-none">{meta.emoji}</span>
-            {user.name}
+            {meta.label ?? user.name}
+            {isCoach && (
+              <span className={`text-[9px] font-bold uppercase tracking-wider ${isActive ? "text-purple-200" : "text-purple-500"}`}>
+                PRO
+              </span>
+            )}
           </button>
         );
       })}
