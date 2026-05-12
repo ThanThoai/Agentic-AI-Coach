@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from app.agent.service import AgentError, AgentService
 from app.core.dependencies import get_current_role, get_current_user
@@ -43,7 +45,9 @@ async def ask_agent(
     try:
         result = await service.run(payload.question, requester_id)
     except AgentError as exc:
-        log.error("agent.failed", user_id=str(requester_id), err=str(exc))
+        log.exception(
+            "agent.failed", user_id=str(requester_id), err_type=type(exc).__name__
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Agent could not produce an answer. Please try again.",
@@ -52,6 +56,41 @@ async def ask_agent(
     return AgentResponse(
         answer=result["answer"],
         tools_used=result["tools_used"],
+        tool_calls=result.get("tool_calls", []),
         iterations=result["iterations"],
         usage=result["usage"],
+    )
+
+
+@router.post(
+    "/ask/stream",
+    summary="Ask the coach assist agent (streaming)",
+)
+async def ask_agent_stream(
+    payload: AgentRequest,
+    requester_id: uuid.UUID = Depends(get_current_user),
+    role: str = Depends(get_current_role),
+    service: AgentService = Depends(get_agent_service),
+) -> StreamingResponse:
+    if role != "coach":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The agent endpoint is only available to coach accounts.",
+        )
+
+    async def _events():
+        try:
+            async for event in service.run_stream(payload.question, requester_id):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception:
+            log.exception(
+                "agent.stream.failed", user_id=str(requester_id)
+            )
+            msg = {"type": "error", "message": "Agent could not produce an answer. Please try again."}
+            yield f"data: {json.dumps(msg)}\n\n"
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -45,7 +45,7 @@ export function MessageBubble({ message }: Props) {
               <span>{isAgent ? "Agent is thinking…" : "Thinking…"}</span>
             </div>
           ) : message.error ? (
-            <p className="text-red-500">{message.error}</p>
+            <ErrorBlock message={message.error} code={message.errorCode} />
           ) : (
             <div className="prose prose-neutral prose-sm max-w-none
               prose-p:my-1.5 prose-ul:my-1.5 prose-ol:my-1.5
@@ -79,6 +79,35 @@ export function MessageBubble({ message }: Props) {
         {/* RAG sources */}
         {!isAnalysis && !isAgent && message.ragResponse?.sources && message.ragResponse.sources.length > 0 && !message.isLoading && (
           <SourceList sources={message.ragResponse.sources} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Error block ───────────────────────────────────────────────────────────────
+
+function ErrorBlock({ message, code }: { message: string; code?: number }) {
+  const isAuth = code === 401 || code === 403;
+  const isOverload = code === 429 || code === 503 || code === 502 || code === 504;
+
+  const icon = isAuth ? "🔒" : isOverload ? "⏳" : "⚠️";
+
+  return (
+    <div className="flex items-start gap-3 border border-red-200 bg-red-50 px-4 py-3">
+      <span className="mt-0.5 text-base leading-none shrink-0">{icon}</span>
+      <div className="min-w-0">
+        <p className="text-sm text-red-700 leading-relaxed">{message}</p>
+        {code !== undefined && (
+          <p className="mt-1 text-xs text-red-400">
+            Error {code}
+            {code === 422 && " · Validation"}
+            {code === 403 && " · Forbidden"}
+            {code === 401 && " · Unauthorized"}
+            {code === 429 && " · Rate limited"}
+            {(code === 502 || code === 503 || code === 504) && " · Unavailable"}
+            {code >= 500 && code < 600 && code !== 502 && code !== 503 && code !== 504 && " · Server error"}
+          </p>
         )}
       </div>
     </div>

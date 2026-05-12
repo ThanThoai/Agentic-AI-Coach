@@ -3,8 +3,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { Message, PipelineStep, RAGResponse, CommandMode, DemoUser } from "@/types/chat";
 import { queryRAGStream, RAGError } from "@/lib/api/rag";
-import { analyzeWorkout, WorkoutError } from "@/lib/api/workout";
-import { askAgent, AgentError } from "@/lib/api/agent";
+import { analyzeWorkoutStream, WorkoutError } from "@/lib/api/workout";
+import { askAgentStream, AgentError } from "@/lib/api/agent";
 import { fetchDemoToken } from "@/lib/api/auth";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
@@ -77,6 +77,29 @@ function finaliseRAGSteps(steps: PipelineStep[], response: RAGResponse): Pipelin
         return { ...s, status: "done" };
     }
   });
+}
+
+function toFriendlyMessage(status: number, raw: string, mode: CommandMode): string {
+  switch (status) {
+    case 401:
+      return "Your session has expired. Please refresh the page and try again.";
+    case 403:
+      return mode === "agent"
+        ? "Only coach accounts can use Agent Assist. Please switch to the coach account."
+        : "You don't have permission for this action.";
+    case 422:
+      return "Your request couldn't be processed. Try rephrasing your question.";
+    case 429:
+      return "Too many requests — please wait a moment before trying again.";
+    case 502:
+    case 503:
+    case 504:
+      return "The service is temporarily unavailable. Please try again in a moment.";
+    default:
+      if (status >= 500) return "Something went wrong on our end. Please try again.";
+      // For other codes use the API message if it's meaningful
+      return raw && !raw.startsWith("Request failed") ? raw : "Something went wrong. Please try again.";
+  }
 }
 
 export function ChatWindow() {
@@ -164,17 +187,48 @@ export function ChatWindow() {
     try {
       if (mode === "agent") {
         if (!user || !isCoach) throw new AgentError(403, "Only coaches can use the agent.");
-        const response = await askAgent(text, user.access_token);
+        const response = await askAgentStream(
+          text,
+          user.access_token,
+          (token) => {
+            setMessages(prev => prev.map(m =>
+              m.id !== assistantId ? m : { ...m, content: m.content + token, isLoading: false }
+            ));
+          },
+          (tools) => {
+            timersRef.current.forEach(clearTimeout);
+            setMessages(prev => prev.map(m => {
+              if (m.id !== assistantId) return m;
+              const steps = (m.pipelineSteps ?? []).map(s => ({ ...s, status: "done" as const }));
+              const toolStep = { label: tools.map(t => t.name).join(", "), status: "done" as const };
+              return { ...m, pipelineSteps: [...steps, toolStep] };
+            }));
+          },
+        );
         timersRef.current.forEach(clearTimeout);
-        updateMessage(assistantId, {
-          content: response.answer,
-          agentResponse: response,
-          pipelineSteps: initialSteps(AGENT_PIPELINE_LABELS).map(s => ({ ...s, status: "done" })),
-          isLoading: false,
-        });
+        // Use streamed content if already built up via onToken; fall back to
+        // response.answer only when no tokens were received (e.g. empty answer).
+        setMessages(prev => prev.map(m => {
+          if (m.id !== assistantId) return m;
+          return {
+            ...m,
+            content: m.content || response.answer,
+            agentResponse: response,
+            pipelineSteps: initialSteps(AGENT_PIPELINE_LABELS).map(s => ({ ...s, status: "done" })),
+            isLoading: false,
+          };
+        }));
       } else if (mode === "analysis") {
         if (!user) throw new WorkoutError(401, "No user selected");
-        const response = await analyzeWorkout(text, user.access_token);
+        const response = await analyzeWorkoutStream(
+          text,
+          user.access_token,
+          (token) => {
+            setMessages(prev => prev.map(m =>
+              m.id !== assistantId ? m : { ...m, content: m.content + token, isLoading: false }
+            ));
+          },
+        );
         timersRef.current.forEach(clearTimeout);
         updateMessage(assistantId, {
           content: response.answer,
@@ -199,12 +253,15 @@ export function ChatWindow() {
     } catch (err) {
       timersRef.current.forEach(clearTimeout);
       let msg = "Something went wrong. Please try again.";
-      if (err instanceof RAGError) msg = `Error ${err.status}: ${err.message}`;
-      else if (err instanceof WorkoutError) msg = `Error ${err.status}: ${err.message}`;
-      else if (err instanceof AgentError) msg = `Agent error ${err.status}: ${err.message}`;
+      let code: number | undefined;
+      if (err instanceof RAGError || err instanceof WorkoutError || err instanceof AgentError) {
+        code = err.status;
+        msg = toFriendlyMessage(err.status, err.message, mode);
+      }
       updateMessage(assistantId, {
         content: "",
         error: msg,
+        errorCode: code,
         pipelineSteps: initialSteps(labels).map(s => ({ ...s, status: "done" })),
         isLoading: false,
       });
@@ -215,6 +272,7 @@ export function ChatWindow() {
 
   function handleUserSelect(user: DemoUser) {
     setActiveUser(user);
+    setMessages([]);
     if (user.role !== "coach" && activeMode === "agent") setActiveMode("question");
   }
 
@@ -251,9 +309,7 @@ export function ChatWindow() {
             </div>
             <h1 className="text-2xl font-semibold text-neutral-900">Coach Agent</h1>
             <p className="mt-2 text-sm text-neutral-500 max-w-xs mx-auto leading-relaxed">
-              {isCoach
-                ? "AI-powered coaching — analyze athletes and get training insights."
-                : "Ask anything about training, nutrition, and programming."}
+              Ask anything about training, nutrition, and programming.
             </p>
           </div>
 
@@ -287,7 +343,7 @@ export function ChatWindow() {
           <p className={`mt-4 text-center text-xs text-neutral-300 transition-opacity duration-300 ${
             isTyping ? "opacity-0" : "opacity-100"
           }`}>
-            Enter to send · Shift+Enter for new line{!isCoach && " · / to switch mode"}
+            Enter to send · Shift+Enter for new line · / to switch mode
           </p>
         </div>
       </div>
@@ -363,7 +419,7 @@ export function ChatWindow() {
                 isCoach={isCoach}
               />
               <p className="mt-2 text-center text-xs text-neutral-300">
-                Enter to send · Shift+Enter for new line{!isCoach && " · / to switch mode"}
+                Enter to send · Shift+Enter for new line · / to switch mode
               </p>
             </div>
           </footer>
@@ -399,15 +455,15 @@ const AGENT_EXAMPLES = [
 ];
 
 function LandingExamples({
-  onExample, disabled, activeMode, isCoach,
+  onExample, disabled, activeMode,
 }: {
   onExample: (q: string, mode: CommandMode) => void;
   disabled: boolean;
   activeMode: CommandMode;
   isCoach: boolean;
 }) {
-  const effectiveMode: CommandMode = isCoach ? "agent" : activeMode;
-  const examples = isCoach ? AGENT_EXAMPLES : activeMode === "analysis" ? ANALYSIS_EXAMPLES : RAG_EXAMPLES;
+  const effectiveMode = activeMode;
+  const examples = activeMode === "agent" ? AGENT_EXAMPLES : activeMode === "analysis" ? ANALYSIS_EXAMPLES : RAG_EXAMPLES;
 
   return (
     <div className="space-y-2">

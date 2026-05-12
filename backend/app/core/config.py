@@ -1,4 +1,5 @@
 from enum import StrEnum
+
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -109,6 +110,8 @@ class Settings(BaseSettings):
     agent_provider: LLMProvider | None = None   # None → default_llm_provider
     agent_model: str | None = None              # None → provider's default_model
     agent_max_iterations: int = 4
+    agent_llm_timeout: float = 60.0    # seconds per complete_with_tools() call
+    agent_tool_timeout: float = 45.0   # seconds per individual tool execution
 
     # Workout analysis — per-step model routing
     # provider: None → falls back to default_llm_provider
