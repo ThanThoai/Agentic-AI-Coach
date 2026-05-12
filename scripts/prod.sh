@@ -45,8 +45,6 @@ up)
     info "Building and starting production services..."
     info "PUBLIC_URL = ${PUBLIC_URL}"
     $COMPOSE up --build -d
-    info "Waiting for services to be healthy..."
-    docker compose wait backend 2>/dev/null || true
     echo
     info "Production deployment is up."
     echo "  Application: ${PUBLIC_URL}"
