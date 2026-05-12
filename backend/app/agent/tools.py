@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Coroutine
 from datetime import date
+from functools import lru_cache
 from typing import Any
 
 import structlog
@@ -21,31 +22,31 @@ def _trim(text: str) -> str:
     return text[: MAX_TOOL_RESULT_CHARS] + "\n[... result trimmed to 4 000 chars]"
 
 
+@lru_cache(maxsize=1)
+def _get_qdrant():
+    from app.core.config import settings
+    from app.vectordb.qdrant import QdrantVectorDB
+
+    return QdrantVectorDB.from_url(
+        url=settings.qdrant_url,
+        collection_name=settings.qdrant_collection_knowledge,
+        api_key=(
+            settings.qdrant_api_key.get_secret_value()
+            if settings.qdrant_api_key
+            else None
+        ),
+    )
+
+
 # ── Tool implementations ───────────────────────────────────────────────────────
 
 async def tool_rag_search(query: str) -> str:
-    from functools import lru_cache
-
-    from app.core.config import settings
     from app.llm.factory import PipelineProviders
     from app.rag.query_processor import process_query
     from app.rag.retriever import assemble_context, retrieve
-    from app.vectordb.qdrant import QdrantVectorDB
-
-    @lru_cache(maxsize=1)
-    def _qdrant() -> QdrantVectorDB:
-        return QdrantVectorDB.from_url(
-            url=settings.qdrant_url,
-            collection_name=settings.qdrant_collection_knowledge,
-            api_key=(
-                settings.qdrant_api_key.get_secret_value()
-                if settings.qdrant_api_key
-                else None
-            ),
-        )
 
     providers = PipelineProviders()
-    qdrant = _qdrant()
+    qdrant = _get_qdrant()
 
     query_type, sub_questions = await process_query(
         query,
@@ -167,14 +168,23 @@ TOOL_REGISTRY: dict[str, Callable[..., Coroutine[Any, Any, str]]] = {
 async def dispatch_tool(tool_call: ToolCall) -> str:
     fn = TOOL_REGISTRY.get(tool_call.name)
     if fn is None:
+        log.warning("agent.tool.unknown", tool=tool_call.name)
         return f"ERROR: Unknown tool '{tool_call.name}'"
+    log.info("agent.tool.start", tool=tool_call.name)
     try:
-        return await fn(**tool_call.input)
+        result = await fn(**tool_call.input)
+        log.info(
+            "agent.tool.done",
+            tool=tool_call.name,
+            result_chars=len(result),
+        )
+        return result
     except Exception as exc:
         log.warning(
             "agent.tool.error",
             tool=tool_call.name,
             err_type=type(exc).__name__,
+            exc_info=True,
         )
         return f"ERROR: {type(exc).__name__}: {exc}"
 
