@@ -37,3 +37,31 @@ def decode_access_token(token: str) -> uuid.UUID:
         return uuid.UUID(str(sub))
     except ValueError as exc:
         raise AuthError("Token sub is not a valid UUID") from exc
+
+
+def decode_access_token_full(token: str) -> tuple[uuid.UUID, str]:
+    """Like decode_access_token but also returns the role claim (defaults to 'athlete')."""
+    try:
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret.get_secret_value(),
+            algorithms=[settings.jwt_algorithm],
+        )
+    except JWTError as exc:
+        raise AuthError("Invalid token") from exc
+
+    sub = payload.get("sub")
+    if sub is None:
+        raise AuthError("Token missing sub claim")
+
+    exp = payload.get("exp")
+    if exp is not None and datetime.fromtimestamp(exp, tz=timezone.utc) < datetime.now(timezone.utc):
+        raise AuthError("Token expired")
+
+    try:
+        user_id = uuid.UUID(str(sub))
+    except ValueError as exc:
+        raise AuthError("Token sub is not a valid UUID") from exc
+
+    role = str(payload.get("role", "athlete"))
+    return user_id, role
