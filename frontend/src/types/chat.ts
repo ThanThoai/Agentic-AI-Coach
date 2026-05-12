@@ -72,15 +72,24 @@ export interface WorkoutDataSummary {
 export interface WorkoutAnalysisResponse {
   answer: string;
   data_summary: WorkoutDataSummary;
+  question_type?: string;
+  focus?: string | null;
   model: string | null;
   usage: TokenUsage | null;
 }
 
 // ── Agent types ───────────────────────────────────────────────────────────────
 
+export interface AgentToolCall {
+  name: string;
+  input: Record<string, unknown>;
+  result_chars: number;
+}
+
 export interface AgentResponse {
   answer: string;
   tools_used: string[];
+  tool_calls: AgentToolCall[];
   iterations: number;
   usage: TokenUsage;
 }
@@ -124,6 +133,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Analyse my workout history with AI",
     placeholder: "What do you want to know about your training?",
   },
+  {
+    name: "/agent",
+    mode: "agent",
+    description: "Coach Assist — ask about your athletes",
+    placeholder: 'Ask about your athletes… e.g. "Is Alex ready to increase weight?"',
+  },
 ];
 
 // ── Message types ─────────────────────────────────────────────────────────────
@@ -149,4 +164,5 @@ export interface Message {
   pipelineSteps?: PipelineStep[];
   isLoading?: boolean;
   error?: string;
+  errorCode?: number;
 }

@@ -166,6 +166,8 @@ async def test_agent_service_end_turn_immediately():
     service._provider = provider
     service._model = None
     service._max_iterations = 4
+    service._llm_timeout = 60.0
+    service._tool_timeout = 45.0
 
     result = await service.run("What is progressive overload?", USER_ID)
     assert result["answer"] == "No tools needed."
@@ -184,6 +186,8 @@ async def test_agent_service_single_tool_then_answer():
     service._provider = provider
     service._model = None
     service._max_iterations = 4
+    service._llm_timeout = 60.0
+    service._tool_timeout = 45.0
 
     rag_result = "=== KNOWLEDGE BASE ===\n[1] test.md\n    overload text"
     with patch("app.agent.tools.tool_rag_search", new=AsyncMock(return_value=rag_result)):
@@ -220,6 +224,8 @@ async def test_agent_service_parallel_tools_then_answer():
     service._provider = provider
     service._model = None
     service._max_iterations = 4
+    service._llm_timeout = 60.0
+    service._tool_timeout = 45.0
 
     with (
         patch("app.agent.tools.tool_analyze_history", new=AsyncMock(return_value="=== WORKOUT ANALYSIS ===")),
@@ -243,6 +249,8 @@ async def test_agent_service_max_iterations_exceeded():
     service._provider = provider
     service._model = None
     service._max_iterations = 2  # force fast exhaustion
+    service._llm_timeout = 60.0
+    service._tool_timeout = 45.0
 
     with patch("app.agent.tools.tool_rag_search", new=AsyncMock(return_value="=== KB ===")):
         with pytest.raises(AgentError, match="max_iterations_exceeded"):
