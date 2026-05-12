@@ -91,7 +91,16 @@ async def classify_question(
             temperature=0.0,
             model=model,
         )
-        data = json.loads(resp.content.strip())
+        content = resp.content.strip()
+        if not content:
+            return "GENERAL", None
+        # Strip markdown code fences if the model wrapped the JSON
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
+        data = json.loads(content)
         q_type = str(data.get("type", "GENERAL")).upper()
         if q_type not in ("TREND", "BALANCE", "NEGLECT", "PLAN", "GENERAL"):
             q_type = "GENERAL"
