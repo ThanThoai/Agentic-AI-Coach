@@ -78,6 +78,7 @@ export async function askAgentStream(
         if (data.type === "token") onToken(data.content as string);
         else if (data.type === "status") onStatus?.(data.tools as string[]);
         else if (data.type === "done") donePayload = data as unknown as AgentStreamDone;
+        else if (data.type === "ping") { /* keepalive — ignore */ }
         else if (data.type === "error") throw new AgentError(500, String(data.message ?? "Stream error"));
       } catch (e) {
         if (e instanceof AgentError) throw e;

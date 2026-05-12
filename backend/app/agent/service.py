@@ -191,8 +191,14 @@ class AgentService:
 
             if response.stop_reason in ("end_turn", "max_tokens"):
                 answer = _extract_text(response.content_blocks)
-                for char in answer:
-                    yield {"type": "token", "content": char}
+                if answer:
+                    yield {"type": "token", "content": answer}
+                else:
+                    log.warning(
+                        "agent.empty_answer",
+                        iteration=iteration + 1,
+                        user_id=str(user_id),
+                    )
                 yield {
                     "type": "done",
                     "answer": answer,
@@ -208,9 +214,18 @@ class AgentService:
 
                 yield {"type": "status", "tools": tool_names}
 
+                # Run tools while sending keepalive pings every 5s so the SSE
+                # connection does not time out during long tool execution.
+                task = asyncio.create_task(self._tool_call(tool_calls))
                 try:
-                    results = await self._tool_call(tool_calls)
+                    while True:
+                        done, _ = await asyncio.wait({task}, timeout=5.0)
+                        if done:
+                            break
+                        yield {"type": "ping"}
+                    results = task.result()
                 except TimeoutError:
+                    task.cancel()
                     log.error(
                         "agent.tools.timeout",
                         tools=tool_names,

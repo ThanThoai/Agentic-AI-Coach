@@ -206,12 +206,18 @@ export function ChatWindow() {
           },
         );
         timersRef.current.forEach(clearTimeout);
-        updateMessage(assistantId, {
-          content: response.answer,
-          agentResponse: response,
-          pipelineSteps: initialSteps(AGENT_PIPELINE_LABELS).map(s => ({ ...s, status: "done" })),
-          isLoading: false,
-        });
+        // Use streamed content if already built up via onToken; fall back to
+        // response.answer only when no tokens were received (e.g. empty answer).
+        setMessages(prev => prev.map(m => {
+          if (m.id !== assistantId) return m;
+          return {
+            ...m,
+            content: m.content || response.answer,
+            agentResponse: response,
+            pipelineSteps: initialSteps(AGENT_PIPELINE_LABELS).map(s => ({ ...s, status: "done" })),
+            isLoading: false,
+          };
+        }));
       } else if (mode === "analysis") {
         if (!user) throw new WorkoutError(401, "No user selected");
         const response = await analyzeWorkoutStream(
