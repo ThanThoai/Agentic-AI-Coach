@@ -34,8 +34,13 @@ RESPONSE_OUT_OF_SCOPE = (
 )
 
 OUT_OF_SCOPE_MESSAGE = (
-    "I couldn't find relevant information in the fitness knowledge base for that question. "
-    "Please ask something related to training, exercise technique, programming, or sports nutrition."
+    "I don't have information on that topic in my knowledge base.\n\n"
+    "I can help with:\n"
+    "- Strength training principles (RPE, progressive overload, periodization)\n"
+    "- Exercise technique and programming (training splits, deload weeks, 1RM)\n"
+    "- Muscle recovery and training frequency\n"
+    "- Nutrition fundamentals for performance\n\n"
+    "Feel free to ask about any of those."
 )
 
 MEDICAL_DISCLAIMER = (
@@ -70,6 +75,48 @@ LAYER2_TRIGGER_PATTERNS: list[str] = [
     r"\b(not eating|skip(ping)? (meals?|food)|barely eat\w*)\b",
     # Mild risk signals → BORDERLINE candidates
     r"\b(sore|soreness|tight|stiff|discomfort)\b",
+]
+
+# Named medical conditions that always trigger L2 classification (do not hard-block at L1
+# since L2 distinguishes informational queries from symptom-reporting queries).
+MEDICAL_CONDITION_TERMS: list[str] = [
+    # Spinal conditions
+    r"herniated?\s+disc",
+    r"bulging?\s+disc",
+    r"slipped?\s+disc",
+    r"\bscoliosis\b",
+    r"spinal\s+stenosis",
+    # Ligament / cartilage injuries
+    r"\bACL\b",
+    r"\bPCL\b",
+    r"\bMCL\b",
+    r"\bLCL\b",
+    r"torn?\s+(ligament|meniscus|labrum|rotator)",
+    r"ruptured?\s+(ligament|tendon|muscle)",
+    r"labral?\s+tear",
+    r"meniscus\s+(tear|damage|injury)",
+    # Bone injuries
+    r"stress\s+fracture",
+    r"bone\s+fracture",
+    r"\bfracture\b",
+    # Chronic conditions
+    r"\barthritis\b",
+    r"\btendinitis\b|\btendonitis\b",
+    r"\bbursitis\b",
+    r"\bimpingement\b",
+    r"plantar\s+fasciitis",
+    r"shin\s+splints",
+    r"rotator\s+cuff",
+]
+
+# Injury-report sentence patterns — broad heuristics that trigger L2 even when no specific
+# condition term is found. L2 (the LLM classifier) makes the final SAFE vs MEDICAL_REFUSE
+# determination; the cost of an extra LLM call is lower than missing a medical context.
+INJURY_REPORT_PATTERNS: list[str] = [
+    r"i\s+have\s+a?\s*\w+\s+(in|on|around)\s+(my\s+)?(back|knee|shoulder|hip|ankle|neck|spine|wrist|elbow)",
+    r"i\s+(have|had|suffer|suffer from|got)\s+a?\s*(injury|condition|problem|issue|damage)\b",
+    r"(my|the)\s+\w+\s+(hurts?|is\s+(injured|damaged|torn|inflamed|swollen|fractured))",
+    r"(diagnosed|told)\s+(with|by)\s+(a\s+)?(doctor|physio|specialist|physician)",
 ]
 
 # ── Layer 2 constants ─────────────────────────────────────────────────────────
@@ -112,7 +159,15 @@ def hard_block_check(question: str) -> str | None:
 def needs_intent_classification(question: str) -> bool:
     """Return True if the question contains signals that require Layer 2 classification."""
     q = question.lower()
-    return any(re.search(p, q) for p in LAYER2_TRIGGER_PATTERNS)
+    if any(re.search(p, q) for p in LAYER2_TRIGGER_PATTERNS):
+        return True
+    # Named medical conditions always trigger L2 regardless of other signals
+    if any(re.search(p, question, re.IGNORECASE) for p in MEDICAL_CONDITION_TERMS):
+        return True
+    # Injury-report sentence patterns (broad; L2 makes the final call)
+    if any(re.search(p, q) for p in INJURY_REPORT_PATTERNS):
+        return True
+    return False
 
 
 # ── Layer 2 — LLM intent classifier ──────────────────────────────────────────

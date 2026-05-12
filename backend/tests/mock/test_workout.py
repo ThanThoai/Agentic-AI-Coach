@@ -623,7 +623,12 @@ class TestWorkoutServiceAnalyse:
             '{"type":"TREND","focus":"Bench Press"}',
             "Your Bench Press is progressing well with **+3% week-over-week**.",
         )
-        req = WorkoutAnalysisRequest(question="How is my bench press progressing?")
+        # Tight date range so density (2 sessions / 14 days ≈ 0.14) exceeds threshold
+        req = WorkoutAnalysisRequest(
+            question="How is my bench press progressing?",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 14),
+        )
         resp = await service.analyse(uuid.uuid4(), req)
         assert "Bench Press" in resp.answer
         assert resp.data_summary.sessions_analysed == 2

@@ -22,6 +22,7 @@ from app.rag.guardrails import (
     hard_block_check,
     needs_intent_classification,
 )
+from app.rag.grounding_check import enforce_grounding
 from app.rag.query_processor import QueryType, process_query
 from app.rag.retriever import AssembledChunk, assemble_context, retrieve
 from app.rag.schemas import (
@@ -62,7 +63,7 @@ async def generate(
     return await provider.complete(
         messages=[LLMMessage(role="user", content=question)],
         system=full_system,
-        max_tokens=512,
+        max_tokens=350,
         temperature=0.2,
         model=model,
     )
@@ -83,7 +84,7 @@ async def generate_stream(
     async for token in provider.stream(
         messages=[LLMMessage(role="user", content=question)],
         system=full_system,
-        max_tokens=512,
+        max_tokens=350,
         temperature=0.2,
         model=model,
     ):
@@ -255,9 +256,23 @@ async def query_rag(
         completion_tokens=llm_response.usage.completion_tokens,
     )
 
+    # ── Grounding check — regenerate if unsupported fraction is too high ─────
+    raw_answer = llm_response.content
+    try:
+        from app.rag.guardrails import parse_llm_output as _parse
+        parsed_answer, _ = _parse(raw_answer, len(used_chunks))
+        grounded = await enforce_grounding(
+            parsed_answer, context, providers.generation, model=providers.generation_model
+        )
+        # Re-wrap as JSON so filter_output can parse it normally
+        import json as _json
+        raw_answer = _json.dumps({"answer": grounded, "cited_indices": list(range(1, len(used_chunks) + 1))})
+    except Exception:
+        log.warning("rag.grounding_check.skipped", exc_info=True)
+
     # ── Layer 3: output filter ────────────────────────────────────────────────
     answer, cited_indices = filter_output(
-        llm_response.content,
+        raw_answer,
         num_chunks=len(used_chunks),
         was_borderline=was_borderline,
     )

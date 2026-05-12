@@ -30,6 +30,36 @@ log = structlog.get_logger(__name__)
 
 MAX_ANSWER_LENGTH = 2000
 
+# Minimum session density to attempt trend analysis.
+# Below this ratio the pipeline flags insufficient_data=True without calling the LLM.
+MIN_SESSIONS_PER_DAY = 0.10  # 1 session per 10 days
+
+
+def _is_sparse_data(
+    session_count: int,
+    date_from: date,
+    date_to: date,
+) -> bool:
+    """Return True when sessions are too sparse relative to the requested window."""
+    if session_count == 0:
+        return False  # handled separately (no-history early return)
+    requested_days = max((date_to - date_from).days + 1, 1)
+    return (session_count / requested_days) < MIN_SESSIONS_PER_DAY
+
+
+def _sparse_data_answer(
+    session_count: int,
+    date_from: date,
+    date_to: date,
+) -> str:
+    requested_days = (date_to - date_from).days + 1
+    return (
+        f"Only {session_count} session(s) found in the last {requested_days} days — "
+        "not enough data to identify reliable training trends. "
+        "For a meaningful analysis, aim for at least 1 session every 10 days in the "
+        "window, or narrow the period to cover a denser training block."
+    )
+
 
 class WorkoutPipelineProviders:
     """LLM providers resolved for the workout analysis pipeline."""
@@ -155,6 +185,9 @@ class WorkoutService:
     ) -> WorkoutAnalysisResponse:
         date_from = request.date_from
         date_to = request.date_to
+        # model_validator guarantees these are non-None after validation
+        assert date_from is not None
+        assert date_to is not None
 
         history = await self._repo.get_history(
             user_id=user_id,
@@ -170,6 +203,21 @@ class WorkoutService:
                 ),
                 data_summary=DataSummary(
                     sessions_analysed=0,
+                    date_range={"from": str(date_from), "to": str(date_to)},
+                    exercises_found=0,
+                    muscle_groups_found=[],
+                    deload_weeks_detected=0,
+                    insufficient_data=True,
+                ),
+                model=None,
+                usage=None,
+            )
+
+        if _is_sparse_data(len(history), date_from, date_to):
+            return WorkoutAnalysisResponse(
+                answer=_sparse_data_answer(len(history), date_from, date_to),
+                data_summary=DataSummary(
+                    sessions_analysed=len(history),
                     date_range={"from": str(date_from), "to": str(date_to)},
                     exercises_found=0,
                     muscle_groups_found=[],
@@ -237,6 +285,8 @@ class WorkoutService:
         """Same pipeline as analyse() but yields SSE-ready dicts for token streaming."""
         date_from = request.date_from
         date_to = request.date_to
+        assert date_from is not None
+        assert date_to is not None
 
         history = await self._repo.get_history(
             user_id=user_id,
@@ -253,6 +303,25 @@ class WorkoutService:
                 ),
                 "data_summary": DataSummary(
                     sessions_analysed=0,
+                    date_range={"from": str(date_from), "to": str(date_to)},
+                    exercises_found=0,
+                    muscle_groups_found=[],
+                    deload_weeks_detected=0,
+                    insufficient_data=True,
+                ).model_dump(),
+                "question_type": "GENERAL",
+                "focus": None,
+                "model": None,
+                "usage": None,
+            }
+            return
+
+        if _is_sparse_data(len(history), date_from, date_to):
+            yield {
+                "type": "done",
+                "answer": _sparse_data_answer(len(history), date_from, date_to),
+                "data_summary": DataSummary(
+                    sessions_analysed=len(history),
                     date_range={"from": str(date_from), "to": str(date_to)},
                     exercises_found=0,
                     muscle_groups_found=[],
