@@ -4,30 +4,24 @@
 
 @layer base {
   html {
-    color-scheme: dark;
+    color-scheme: light;
   }
 
   body {
-    @apply bg-gray-950 text-gray-100;
+    @apply bg-neutral-50 text-neutral-900;
   }
 
-  /* Scrollbar */
   ::-webkit-scrollbar {
-    width: 6px;
+    width: 5px;
+    height: 5px;
   }
   ::-webkit-scrollbar-track {
     @apply bg-transparent;
   }
   ::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-white/10;
+    @apply bg-neutral-300;
   }
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-white/20;
-  }
-}
-
-@layer utilities {
-  .bg-white\/8 {
-    background-color: rgb(255 255 255 / 0.08);
+    @apply bg-neutral-400;
   }
 }

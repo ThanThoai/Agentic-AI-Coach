@@ -9,18 +9,18 @@ interface UserSelectorProps {
   loading: boolean;
 }
 
-const USER_META: Record<string, { color: string; bg: string; emoji: string; label?: string }> = {
-  alex:  { color: "text-indigo-300",  bg: "bg-indigo-600",  emoji: "💪" },
-  binh:  { color: "text-emerald-300", bg: "bg-emerald-600", emoji: "🏃" },
-  coach: { color: "text-purple-200",  bg: "bg-purple-700",  emoji: "🎯", label: "Coach" },
+const USER_META: Record<string, { activeClass: string; emoji: string; label?: string }> = {
+  alex:  { activeClass: "bg-indigo-600 text-white border-indigo-600",  emoji: "💪" },
+  binh:  { activeClass: "bg-emerald-600 text-white border-emerald-600", emoji: "🏃" },
+  coach: { activeClass: "bg-violet-600 text-white border-violet-600",  emoji: "🎯", label: "Coach" },
 };
 
 export function UserSelector({ users, activeKey, onSelect, loading }: UserSelectorProps) {
   return (
     <div className="flex items-center gap-1.5">
-      <span className="text-xs text-gray-600 mr-1">User:</span>
+      <span className="text-xs text-neutral-400 mr-0.5">User:</span>
       {users.map((user) => {
-        const meta = USER_META[user.key] ?? { color: "text-gray-300", bg: "bg-gray-600", emoji: "👤" };
+        const meta = USER_META[user.key] ?? { activeClass: "bg-neutral-700 text-white border-neutral-700", emoji: "👤" };
         const isActive = user.key === activeKey;
         const isCoach = user.role === "coach";
         return (
@@ -30,19 +30,18 @@ export function UserSelector({ users, activeKey, onSelect, loading }: UserSelect
             disabled={loading}
             title={`Switch to ${user.name}`}
             className={`
-              flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium
-              transition-all duration-150 disabled:cursor-not-allowed
+              flex items-center gap-1.5 border px-2.5 py-1 text-xs font-medium
+              transition-colors disabled:cursor-not-allowed
               ${isActive
-                ? `${meta.bg} text-white shadow-md ring-2 ring-white/20`
-                : "bg-white/8 text-gray-400 hover:bg-white/12 hover:text-gray-200"
+                ? meta.activeClass
+                : "border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50 hover:text-neutral-800"
               }
-              ${isCoach ? "border border-purple-500/30" : ""}
             `}
           >
             <span className="text-sm leading-none">{meta.emoji}</span>
             {meta.label ?? user.name}
             {isCoach && (
-              <span className={`text-[9px] font-bold uppercase tracking-wider ${isActive ? "text-purple-200" : "text-purple-500"}`}>
+              <span className={`text-[9px] font-bold uppercase tracking-wider ${isActive ? "text-violet-200" : "text-violet-500"}`}>
                 PRO
               </span>
             )}

@@ -13,29 +13,23 @@ export function SourceList({ sources }: Props) {
   if (sources.length === 0) return null;
 
   return (
-    <div className="mt-3 space-y-1.5">
-      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-        Sources
-      </p>
+    <div className="space-y-1.5">
+      <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-400">Sources</p>
       {sources.map((src, i) => (
         <div
           key={i}
-          className="rounded-lg border border-white/10 bg-white/5 overflow-hidden"
+          className="border border-neutral-200 bg-white overflow-hidden"
         >
           <button
             onClick={() => setExpanded(expanded === i ? null : i)}
-            className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-white/5 transition-colors"
+            className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-neutral-50 transition-colors"
           >
-            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-white/10 text-xs font-bold text-gray-400">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center bg-neutral-100 text-xs font-bold text-neutral-500">
               {i + 1}
             </span>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm text-gray-300">
-                {src.doc_title}
-              </div>
-              <div className="truncate text-xs text-gray-500">
-                {src.section_title}
-              </div>
+              <div className="truncate text-sm text-neutral-700">{src.doc_title}</div>
+              <div className="truncate text-xs text-neutral-400">{src.section_title}</div>
             </div>
             <div className="shrink-0 flex items-center gap-2">
               <ScoreBar score={src.score} />
@@ -46,7 +40,7 @@ export function SourceList({ sources }: Props) {
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2"
-                className={`text-gray-600 transition-transform ${expanded === i ? "rotate-180" : ""}`}
+                className={`text-neutral-400 transition-transform ${expanded === i ? "rotate-180" : ""}`}
               >
                 <path d="M6 9l6 6 6-6" />
               </svg>
@@ -54,10 +48,8 @@ export function SourceList({ sources }: Props) {
           </button>
 
           {expanded === i && (
-            <div className="border-t border-white/10 px-3 py-2 text-xs text-gray-400 leading-relaxed">
-              <p className="mb-1 text-gray-500 font-medium">
-                {src.source_file}
-              </p>
+            <div className="border-t border-neutral-100 px-3 py-2 text-xs text-neutral-500 leading-relaxed bg-neutral-50">
+              <p className="mb-1 font-medium text-neutral-400">{src.source_file}</p>
               <p className="italic">{src.excerpt}</p>
             </div>
           )}
@@ -70,20 +62,15 @@ export function SourceList({ sources }: Props) {
 function ScoreBar({ score }: { score: number }) {
   const pct = Math.round(score * 100);
   const color =
-    pct >= 80
-      ? "bg-emerald-500"
-      : pct >= 60
-        ? "bg-amber-500"
-        : "bg-gray-500";
+    pct >= 80 ? "bg-emerald-500"
+    : pct >= 60 ? "bg-amber-400"
+    : "bg-neutral-300";
   return (
     <div className="flex items-center gap-1" title={`Score: ${pct}%`}>
-      <div className="h-1.5 w-12 rounded-full bg-white/10">
-        <div
-          className={`h-full rounded-full ${color}`}
-          style={{ width: `${pct}%` }}
-        />
+      <div className="h-1.5 w-12 bg-neutral-100">
+        <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
       </div>
-      <span className="text-xs text-gray-600">{pct}%</span>
+      <span className="text-xs text-neutral-400">{pct}%</span>
     </div>
   );
 }

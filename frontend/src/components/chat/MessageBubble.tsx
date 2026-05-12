@@ -3,7 +3,6 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message, WorkoutDataSummary, AgentResponse } from "@/types/chat";
-import { ThinkingPanel } from "./ThinkingPanel";
 import { SourceList } from "./SourceList";
 import { Spinner } from "@/components/ui/Spinner";
 
@@ -13,20 +12,10 @@ interface Props {
 
 export function MessageBubble({ message }: Props) {
   if (message.role === "user") {
-    const hasAgentMention = message.content.includes("@AgentAssist");
     return (
       <div className="flex justify-end">
-        <div className="max-w-[75%] rounded-2xl rounded-tr-sm bg-indigo-600 px-4 py-2.5 text-sm text-white leading-relaxed">
-          {hasAgentMention ? (
-            <>
-              {message.content.split("@AgentAssist").flatMap((part, i, arr) => [
-                part,
-                i < arr.length - 1 ? (
-                  <span key={i} className="font-semibold text-purple-200">@AgentAssist</span>
-                ) : null,
-              ])}
-            </>
-          ) : message.content}
+        <div className="max-w-[75%] bg-indigo-600 px-4 py-2.5 text-sm text-white leading-relaxed">
+          {message.content}
         </div>
       </div>
     );
@@ -38,52 +27,37 @@ export function MessageBubble({ message }: Props) {
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[85%] min-w-[240px]">
-        {/* Pipeline thinking panel */}
-        {message.pipelineSteps && (
-          <ThinkingPanel
-            steps={message.pipelineSteps}
-            ragResponse={message.ragResponse}
-            isLoading={!!message.isLoading}
-            isAgent={isAgent}
-            agentResponse={message.agentResponse}
-          />
-        )}
+      <div className="max-w-[85%] min-w-[240px] space-y-2">
 
         {/* Answer bubble */}
-        <div className={`rounded-2xl rounded-tl-sm px-4 py-3 text-sm leading-relaxed ${isAgent ? "bg-purple-950/40 border border-purple-500/20" : "bg-white/[0.08]"}`}>
+        <div className="border border-neutral-200 bg-white px-4 py-3 text-sm leading-relaxed">
           {/* Agent badge */}
           {isAgent && !message.isLoading && (
-            <div className="flex items-center gap-1.5 mb-2 pb-2 border-b border-purple-500/20">
+            <div className="flex items-center gap-1.5 mb-2 pb-2 border-b border-neutral-100">
               <span className="text-base">🤖</span>
-              <span className="text-[10px] font-bold uppercase tracking-widest text-purple-400">Coach Agent</span>
-              {message.dataOwner && (
-                <span className="ml-auto text-[10px] text-purple-600">
-                  re: {message.dataOwner.name}
-                </span>
-              )}
+              <span className="text-[10px] font-bold uppercase tracking-widest text-violet-600">Coach Agent</span>
             </div>
           )}
 
           {message.isLoading && !message.content ? (
-            <div className="flex items-center gap-2 text-gray-400">
+            <div className="flex items-center gap-2 text-neutral-400">
               <Spinner size={14} />
               <span>{isAgent ? "Agent is thinking…" : "Thinking…"}</span>
             </div>
           ) : message.error ? (
-            <p className="text-red-400">{message.error}</p>
+            <p className="text-red-500">{message.error}</p>
           ) : (
-            <div className="prose prose-invert prose-sm max-w-none
+            <div className="prose prose-neutral prose-sm max-w-none
               prose-p:my-1.5 prose-ul:my-1.5 prose-ol:my-1.5
               prose-li:my-0.5 prose-headings:mb-2 prose-headings:mt-3
-              prose-strong:text-gray-200 prose-code:text-indigo-300
-              prose-code:bg-white/10 prose-code:px-1 prose-code:rounded
-              prose-blockquote:border-indigo-500 prose-blockquote:text-gray-400">
+              prose-strong:text-neutral-800 prose-code:text-indigo-700
+              prose-code:bg-indigo-50 prose-code:px-1 prose-code:rounded
+              prose-blockquote:border-indigo-400 prose-blockquote:text-neutral-500">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {message.content}
               </ReactMarkdown>
               {isStreaming && (
-                <span className="ml-0.5 inline-block h-[1em] w-0.5 translate-y-[2px] animate-pulse rounded-sm bg-gray-400" />
+                <span className="ml-0.5 inline-block h-[1em] w-0.5 translate-y-[2px] animate-pulse rounded-sm bg-neutral-400" />
               )}
             </div>
           )}
@@ -91,7 +65,7 @@ export function MessageBubble({ message }: Props) {
 
         {/* Agent metadata panel */}
         {isAgent && message.agentResponse && !message.isLoading && (
-          <AgentMetaPanel response={message.agentResponse} dataOwner={message.dataOwner} />
+          <AgentMetaPanel response={message.agentResponse} />
         )}
 
         {/* Analysis data summary panel */}
@@ -113,26 +87,18 @@ export function MessageBubble({ message }: Props) {
 
 // ── Agent metadata panel ──────────────────────────────────────────────────────
 
-const TOOL_META: Record<string, { emoji: string; label: string; color: string }> = {
-  analyze_history: { emoji: "📊", label: "Workout data",    color: "text-emerald-400" },
-  rag_search:      { emoji: "📚", label: "Knowledge base",  color: "text-indigo-400"  },
+const TOOL_META: Record<string, { emoji: string; label: string }> = {
+  analyze_history: { emoji: "📊", label: "Workout data" },
+  rag_search:      { emoji: "📚", label: "Knowledge base" },
 };
 
-function AgentMetaPanel({
-  response,
-  dataOwner,
-}: {
-  response: AgentResponse;
-  dataOwner?: { key: string; name: string };
-}) {
+function AgentMetaPanel({ response }: { response: AgentResponse }) {
   const uniqueTools = [...new Set(response.tools_used)];
   return (
-    <div className="mt-2 rounded-xl border border-purple-500/15 bg-purple-950/20 px-4 py-3">
+    <div className="border border-neutral-200 bg-neutral-50 px-4 py-3">
       <div className="mb-2 flex items-center justify-between">
-        <p className="text-[10px] font-semibold uppercase tracking-widest text-purple-600">
-          Agent run
-        </p>
-        <span className="text-[10px] text-gray-600">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-400">Agent run</p>
+        <span className="text-[10px] text-neutral-500">
           {response.iterations} iteration{response.iterations !== 1 ? "s" : ""}
           {" · "}
           {response.usage.total_tokens.toLocaleString()} tokens
@@ -140,35 +106,24 @@ function AgentMetaPanel({
       </div>
       <div className="flex flex-wrap gap-1.5">
         {uniqueTools.length === 0 ? (
-          <span className="text-xs text-gray-600">No tools used</span>
+          <span className="text-xs text-neutral-400">No tools used</span>
         ) : uniqueTools.map((t) => {
-          const meta = TOOL_META[t] ?? { emoji: "🔧", label: t, color: "text-gray-400" };
+          const meta = TOOL_META[t] ?? { emoji: "🔧", label: t };
           return (
             <span
               key={t}
-              className={`flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2.5 py-0.5 text-xs ${meta.color}`}
+              className="flex items-center gap-1 border border-neutral-200 bg-white px-2.5 py-0.5 text-xs text-neutral-600"
             >
-              <span>{meta.emoji}</span>
-              {meta.label}
+              {meta.emoji} {meta.label}
             </span>
           );
         })}
-        {dataOwner && (
-          <span className="ml-auto text-[10px] text-gray-600 self-center">
-            athlete: {dataOwner.name}
-          </span>
-        )}
       </div>
     </div>
   );
 }
 
 // ── Analysis data summary panel ───────────────────────────────────────────────
-
-const USER_COLOR: Record<string, string> = {
-  alex: "text-indigo-400",
-  binh: "text-emerald-400",
-};
 
 function DataSummaryPanel({
   summary,
@@ -179,22 +134,18 @@ function DataSummaryPanel({
 }) {
   if (summary.insufficient_data) {
     return (
-      <div className="mt-2 rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">
+      <div className="border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
         Not enough workout data in the selected date range to run a full analysis.
       </div>
     );
   }
 
   return (
-    <div className="mt-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3">
+    <div className="border border-neutral-200 bg-neutral-50 px-4 py-3">
       <div className="mb-2 flex items-center justify-between">
-        <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-600">
-          Data used
-        </p>
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-400">Data used</p>
         {dataOwner && (
-          <span className={`text-[10px] font-semibold ${USER_COLOR[dataOwner.key] ?? "text-gray-400"}`}>
-            {dataOwner.name}&apos;s data
-          </span>
+          <span className="text-[10px] text-neutral-500">{dataOwner.name}&apos;s data</span>
         )}
       </div>
       <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
@@ -213,8 +164,8 @@ function DataSummaryPanel({
 function StatRow({ label, value, wide }: { label: string; value: string; wide?: boolean }) {
   return (
     <div className={wide ? "col-span-2" : ""}>
-      <span className="text-gray-500">{label}: </span>
-      <span className="text-gray-300">{value}</span>
+      <span className="text-neutral-400">{label}: </span>
+      <span className="text-neutral-700">{value}</span>
     </div>
   );
 }
