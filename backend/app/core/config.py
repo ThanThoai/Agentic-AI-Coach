@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
+    # Database — required; set DATABASE_URL in .env
+    database_url: str
+
     # Knowledge base
     knowledge_base_path: str = "../knowledge-base"
 
@@ -101,6 +104,17 @@ class Settings(BaseSettings):
     openrouter_rewrite_model: str = "anthropic/claude-haiku-4-5"
     openrouter_conflict_model: str = "anthropic/claude-haiku-4-5"
     openrouter_generation_model: str = "anthropic/claude-sonnet-4-5"
+
+    # Workout analysis — per-step model routing
+    # provider: None → falls back to default_llm_provider
+    # model:    None → falls back to the provider's own default_model
+    workout_classifier_provider: LLMProvider | None = None
+    workout_classifier_model: str | None = None
+    workout_generation_provider: LLMProvider | None = None
+    workout_generation_model: str | None = None
+    # Per-step model defaults when using OpenRouter (overrides workout_*_model when set)
+    openrouter_workout_classifier_model: str = "anthropic/claude-haiku-4-5"
+    openrouter_workout_generation_model: str = "anthropic/claude-sonnet-4-5"
 
     @field_validator("jwt_secret", mode="before")
     @classmethod
