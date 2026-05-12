@@ -58,6 +58,60 @@ export interface RAGResponse {
   trace: PipelineTrace | null;
 }
 
+// ── Workout analysis types ────────────────────────────────────────────────────
+
+export interface WorkoutDataSummary {
+  sessions_analysed: number;
+  date_range: { from: string; to: string };
+  exercises_found: number;
+  muscle_groups_found: string[];
+  deload_weeks_detected: number;
+  insufficient_data: boolean;
+}
+
+export interface WorkoutAnalysisResponse {
+  answer: string;
+  data_summary: WorkoutDataSummary;
+  model: string | null;
+  usage: TokenUsage | null;
+}
+
+// ── User / command types ──────────────────────────────────────────────────────
+
+export interface DemoUser {
+  user_id: string;
+  access_token: string;
+  name: string;
+  /** "alex" | "binh" */
+  key: string;
+}
+
+export type CommandMode = "question" | "analysis";
+
+export interface SlashCommand {
+  name: string;
+  mode: CommandMode;
+  description: string;
+  placeholder: string;
+}
+
+export const SLASH_COMMANDS: SlashCommand[] = [
+  {
+    name: "/question",
+    mode: "question",
+    description: "Search the fitness knowledge base",
+    placeholder: "Ask a fitness question…",
+  },
+  {
+    name: "/analysis",
+    mode: "analysis",
+    description: "Analyse my workout history with AI",
+    placeholder: "What do you want to know about your training?",
+  },
+];
+
+// ── Message types ─────────────────────────────────────────────────────────────
+
 export type MessageRole = "user" | "assistant";
 
 export interface PipelineStep {
@@ -70,7 +124,9 @@ export interface Message {
   id: string;
   role: MessageRole;
   content: string;
+  commandMode?: CommandMode;
   ragResponse?: RAGResponse;
+  workoutResponse?: WorkoutAnalysisResponse;
   pipelineSteps?: PipelineStep[];
   isLoading?: boolean;
   error?: string;
