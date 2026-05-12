@@ -65,7 +65,10 @@ export function MessageBubble({ message }: Props) {
 
         {/* Analysis data summary panel */}
         {isAnalysis && message.workoutResponse && !message.isLoading && (
-          <DataSummaryPanel summary={message.workoutResponse.data_summary} />
+          <DataSummaryPanel
+            summary={message.workoutResponse.data_summary}
+            dataOwner={message.dataOwner}
+          />
         )}
 
         {/* RAG sources */}
@@ -77,7 +80,18 @@ export function MessageBubble({ message }: Props) {
   );
 }
 
-function DataSummaryPanel({ summary }: { summary: WorkoutDataSummary }) {
+const USER_COLOR: Record<string, string> = {
+  alex: "text-indigo-400",
+  binh: "text-emerald-400",
+};
+
+function DataSummaryPanel({
+  summary,
+  dataOwner,
+}: {
+  summary: WorkoutDataSummary;
+  dataOwner?: { key: string; name: string };
+}) {
   if (summary.insufficient_data) {
     return (
       <div className="mt-2 rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">
@@ -88,9 +102,16 @@ function DataSummaryPanel({ summary }: { summary: WorkoutDataSummary }) {
 
   return (
     <div className="mt-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3">
-      <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-gray-600">
-        Data used
-      </p>
+      <div className="mb-2 flex items-center justify-between">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-600">
+          Data used
+        </p>
+        {dataOwner && (
+          <span className={`text-[10px] font-semibold ${USER_COLOR[dataOwner.key] ?? "text-gray-400"}`}>
+            {dataOwner.name}&apos;s data
+          </span>
+        )}
+      </div>
       <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
         <StatRow label="Sessions" value={String(summary.sessions_analysed)} />
         <StatRow label="Exercises" value={String(summary.exercises_found)} />
