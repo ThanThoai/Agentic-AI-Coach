@@ -1,4 +1,5 @@
 import type { AgentResponse } from "@/types/chat";
+import { extractApiMessage } from "./errors";
 
 const API_BASE = "";
 
@@ -23,10 +24,8 @@ export async function askAgent(
   });
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: res.statusText })) as {
-      detail?: string;
-    };
-    throw new AgentError(res.status, body.detail ?? res.statusText);
+    const body = await res.json().catch(() => ({}));
+    throw new AgentError(res.status, extractApiMessage(body, `Request failed (${res.status})`));
   }
 
   return res.json() as Promise<AgentResponse>;
