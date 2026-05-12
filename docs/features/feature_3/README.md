@@ -1,6 +1,6 @@
 # Feature 3 — Coach Assist Agent
 
-**Version:** v1.0 | **Status:** Planned | **Last updated:** 2026-05-12
+**Status:** Implemented | **Last updated:** 2026-05-12
 
 ---
 
@@ -11,7 +11,7 @@
 >
 > The agent must have access to at least two tools:
 > - `rag_search(query)` — Feature 1 RAG pipeline (fitness knowledge base)
-> - `analyze_history(question)` — Feature 2 analysis endpoint (user's workout data)
+> - `analyze_history(athlete, question)` — Feature 2 analysis for a named athlete
 >
 > The agent must:
 > - Decide which tools to call and in what sequence — do not hardcode the call order
@@ -24,11 +24,11 @@
 
 | Question | Expected tool usage |
 |----------|-------------------|
-| "Based on my recent workout history, is my bench press ready for a weight increase? What does proper progressive overload look like?" | `analyze_history` → `rag_search` |
-| "I haven't done any pulling exercises this month and am getting shoulder tightness. What should I do?" | `analyze_history` (verify pulling deficit) → `rag_search` (shoulder health + pulling exercises) |
+| "Based on Binh's recent workout history, is his bench ready for a weight increase? What does progressive overload look like?" | `analyze_history(athlete="Binh", ...)` → `rag_search` |
+| "Compare Alex and Binh's push/pull volume — who needs more pulling work?" | `analyze_history` × 2 (parallel) → `rag_search` |
 | "What is RPE and how should I use it?" | `rag_search` only |
-| "How has my squat progressed?" | `analyze_history` only |
-| "Should I deload this week?" | `analyze_history` (detect deload signals) → `rag_search` (deload principles) |
+| "How has Alex's squat progressed this month?" | `analyze_history` only |
+| "Should I deload Binh this week?" | `analyze_history` → `rag_search` |
 
 ---
 
@@ -36,8 +36,8 @@
 
 | File | Scope |
 |------|-------|
-| [agent-loop.md](./agent-loop.md) | Claude native tool_use protocol, conversation structure, stopping conditions, max iterations, parallel tool calls, error handling |
-| [tools.md](./tools.md) | Tool definitions (JSON Schema), `rag_search` and `analyze_history` wrappers, result formatting, insufficient data handling |
+| [agent-loop.md](./agent-loop.md) | Claude native tool_use protocol, conversation structure, stopping conditions, max iterations, parallel tool calls, timeout/keepalive, error handling |
+| [tools.md](./tools.md) | Tool definitions (JSON Schema), `rag_search` and `analyze_history` wrappers, roster resolution, result formatting, insufficient data handling |
 | [synthesis.md](./synthesis.md) | Final response synthesis — system prompt, citation format, combining both data sources, tone and coherence |
 
 ---
@@ -49,42 +49,51 @@
  ONLINE — per coach request
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  POST /api/v1/agent/ask  { "question": "..." }
+  POST /api/v1/agent/ask         ← single JSON response
+  POST /api/v1/agent/ask/stream  ← SSE streaming
           │
           ▼  Auth middleware
-    get_current_user()  →  user_id
-    (bound to analyze_history tool — isolation guaranteed)
+    get_current_user()  →  user_id  (role must be "coach")
           │
-          ▼  AgentService.run(question, user_id)
+          ▼  AgentService.run_stream(question, user_id)
     Build initial messages:
-      [system_prompt, { role: user, content: question }]
+      [{ role: user, content: question }]
           │
-          ▼ ── Agent loop (max 4 iterations) ───────────────────
+          ▼ ── Agent loop (max 4 iterations) ────────────────────
           │
-          │  LLM call  (Sonnet, tool_choice="auto")
+          │  LLM call  (Sonnet, tool_choice="auto", timeout 60 s)
+          │  keepalive: ping SSE client every 5 s during LLM wait
           │       │
           │       ├─ stop_reason == "end_turn"
-          │       │      → exit loop; final answer is text content
+          │       │      → yield token event; yield done event; exit
           │       │
           │       └─ stop_reason == "tool_use"
-          │              → parse tool call(s) from content blocks
-          │              → execute tool(s) — possibly in parallel
+          │              → yield status event  {tools: [{name, input}]}
+          │              → execute tool(s) in parallel (asyncio.gather)
+          │                keepalive: ping SSE client during tool wait
           │              → append tool_result blocks to messages
+          │              → record {name, input, result_chars} per tool
           │              → next iteration
           │
           ├─ rag_search(query)
-          │    └─ calls Feature 1 pipeline internally (no HTTP)
-          │       → formats result as structured text block
+          │    └─ calls Feature 1 pipeline directly (no HTTP)
+          │       → returns structured knowledge block
           │
-          └─ analyze_history(question)
-               └─ calls Feature 2 analytics + LLM internally
-                  user_id injected from auth context (not from LLM)
-                  → formats result as structured text block
+          └─ analyze_history(athlete, question, date_from?, date_to?)
+               └─ resolves athlete name → user_id via server-side roster
+                  calls Feature 2 analytics + LLM directly
+                  → returns structured analysis block
           │
-          ▼ ── End loop ───────────────────────────────────────
+          ▼ ── End loop ──────────────────────────────────────────
           │
-          ▼  AgentResponse
-    { answer, tools_used, model, usage }
+          ▼  SSE events
+    status  { type:"status", tools:[{name, input}] }     ← before each tool batch
+    token   { type:"token",  content:"..." }              ← final answer text
+    done    { type:"done",   answer, tools_used,
+              tool_calls:[{name,input,result_chars}],
+              iterations, usage }
+    ping    { type:"ping" }                               ← keepalive (ignore)
+    error   { type:"error", message:"..." }               ← on failure
 ```
 
 ---
@@ -93,15 +102,16 @@
 
 | Decision | Choice | Reason |
 |----------|--------|--------|
-| Tool selection | LLM decides via `tool_choice="auto"` | Satisfies the "do not hardcode call order" requirement; LLM reasons about which data is needed |
-| Parallel tool calls | Supported — multiple tool_use blocks in one LLM turn execute with `asyncio.gather` | Claude may request both tools in a single turn when the question clearly needs both; reduces latency |
-| user_id binding | Injected server-side from JWT, not passed by LLM | LLM cannot forge or alter the user identity; tool wrapper always uses the authenticated user |
+| Tool selection | LLM decides via `tool_choice="auto"` | Satisfies "do not hardcode call order"; LLM reasons about which data is needed |
+| Parallel tool calls | Supported — multiple `tool_use` blocks execute with `asyncio.gather` | Claude requests both tools in a single turn when needed; halves latency for dual-tool questions |
+| Athlete resolution | Agent passes athlete *name*; server resolves name → user_id via `ATHLETE_ROSTER` | LLM cannot forge user identity; coach specifies athletes by name in natural language |
 | Internal tool calls | Direct function calls, not HTTP | Avoids network overhead and double auth; Feature 1 and Feature 2 services are imported directly |
-| Max iterations | 4 | Prevents infinite loops; a simple question needs ≤ 2 iterations (one tool call + final answer), complex ones ≤ 3; 4 is a safety ceiling |
-| Stop condition | `stop_reason == "end_turn"` | Claude's native signal that it is done reasoning and has produced a final answer |
-| Insufficient data handling | Tool returns a structured error string; LLM decides how to respond | The agent can still answer the knowledge part even if workout data is missing — graceful degradation |
-| Provider | Sonnet for orchestration | Needs strong reasoning to decide tool order and synthesize multi-source answers; Haiku is insufficient for this |
-| No streaming | Single POST response | The agent loop makes multiple LLM calls; streaming mid-loop is complex and not required by the spec |
+| Max iterations | 4 | Safety ceiling; simple questions need ≤ 2 iterations, complex ones ≤ 3 |
+| Stop condition | `stop_reason == "end_turn"` | Claude's native signal that it has produced a final answer |
+| Timeout + keepalive | LLM call: 60 s, tool call: 45 s; ping every 5 s | Prevents SSE connection timeout during long LLM/tool waits without dropping the stream |
+| SSE streaming | `POST /api/v1/agent/ask/stream` | Lets the UI show tool usage steps and final answer without a long blocking wait |
+| Insufficient data | Tool returns structured error string; LLM decides how to respond | Agent can still answer the knowledge part even if workout data is missing |
+| Provider | Sonnet for orchestration | Needs strong reasoning to decide tool order and synthesise multi-source answers |
 
 ---
 
@@ -111,34 +121,37 @@
 backend/app/
 ├── agent/
 │   ├── __init__.py
-│   ├── service.py          AgentService.run() — the main agent loop
-│   ├── tools.py            Tool wrappers: rag_search(), analyze_history()
+│   ├── service.py          AgentService.run() / run_stream() — the main agent loop
+│   ├── tools.py            Tool wrappers: tool_rag_search(), tool_analyze_history()
 │   ├── tool_schemas.py     JSON Schema definitions for Claude tool_use
-│   └── prompts.py          COACH_AGENT_SYSTEM prompt
+│   └── roster.py           ATHLETE_ROSTER — name → user_id mapping
+├── prompts/
+│   └── agent.py            COACH_AGENT_SYSTEM prompt
 ├── schemas/
-│   └── agent.py            AgentRequest, AgentResponse Pydantic schemas
+│   └── agent.py            AgentRequest, AgentResponse, AgentToolCall Pydantic schemas
 └── api/v1/
-    └── agent.py            POST /api/v1/agent/ask route handler
+    └── agent.py            POST /api/v1/agent/ask and /ask/stream route handlers
 
 backend/tests/mock/
-└── test_agent.py           Agent loop tests, tool routing tests, isolation test
+└── test_agent.py           Agent loop tests, tool routing tests, timeout fixture
 ```
 
 ---
 
 ## API contract
 
-### Request
+### Request (both endpoints)
 
 ```http
 POST /api/v1/agent/ask
-Authorization: Bearer <token>
+POST /api/v1/agent/ask/stream
+Authorization: Bearer <token>   (role must be "coach")
 Content-Type: application/json
 ```
 
 ```json
 {
-  "question": "Based on my recent workout history, is my bench press ready for a weight increase? What does progressive overload look like for my level?"
+  "question": "Based on Binh's recent workout history, is he ready to increase bench press weight? What does proper progressive overload look like?"
 }
 ```
 
@@ -146,13 +159,27 @@ Content-Type: application/json
 |-------|------|-------------|
 | `question` | `string` | 5–1000 characters |
 
-### Response
+---
+
+### Non-streaming response (`/ask`)
 
 ```json
 {
-  "answer": "Looking at your bench press data over the past 4 weeks, you've progressed from 80 kg to 87.5 kg (+9.4%), completing all target reps without a missed set. This is a strong signal that you're ready for a small increase...\n\nAccording to progressive overload principles, for intermediate lifters the recommended increment is 2.5 kg per session once you can complete all sets at the target rep range with RPE ≤ 8 [1]...",
+  "answer": "Binh's bench press has progressed from 55 kg to 62.5 kg (+13.6%) over the last 6 weeks...",
   "tools_used": ["analyze_history", "rag_search"],
-  "model": "claude-sonnet-4-6",
+  "tool_calls": [
+    {
+      "name": "analyze_history",
+      "input": { "athlete": "Binh", "question": "bench press trend and readiness for weight increase" },
+      "result_chars": 1842
+    },
+    {
+      "name": "rag_search",
+      "input": { "query": "progressive overload principles intermediate lifter bench press" },
+      "result_chars": 2150
+    }
+  ],
+  "iterations": 2,
   "usage": {
     "prompt_tokens": 1840,
     "completion_tokens": 420,
@@ -164,16 +191,30 @@ Content-Type: application/json
 | Field | Type | Notes |
 |-------|------|-------|
 | `answer` | `string` | Markdown; cites workout numbers and knowledge sources |
-| `tools_used` | `string[]` | Subset of `["rag_search", "analyze_history"]`; empty if answered directly |
-| `model` | `string` | Model used for the final generation turn |
-| `usage` | `object` | Aggregate across all LLM turns in the loop |
+| `tools_used` | `string[]` | Names of tools called (may repeat if called multiple times) |
+| `tool_calls` | `object[]` | Full detail per call: `name`, `input` params, `result_chars` |
+| `iterations` | `integer` | Number of LLM turns in the loop |
+| `usage` | `object` | Aggregate token usage across all LLM turns |
+
+---
+
+### Streaming events (`/ask/stream`)
+
+The server sends `text/event-stream` with `data: <json>\n\n` lines.
+
+| Event type | Payload | When |
+|------------|---------|------|
+| `status` | `{ tools: [{name, input}] }` | Before each tool batch executes |
+| `token` | `{ content: "..." }` | Final answer text (sent once) |
+| `done` | Full response object (same as non-streaming) | After answer |
+| `ping` | `{}` | Every 5 s during long LLM/tool waits — ignore |
+| `error` | `{ message: "..." }` | On timeout or unhandled error |
 
 ---
 
 ## Open questions
 
-1. **Multi-client coach scenario** — The current design binds `analyze_history` to the authenticated user. A real coach may want to query a specific client's data. Future work: add `client_id` parameter and an explicit coach–client relationship model.
-2. **Token budget across turns** — Each loop iteration consumes tokens. With 4 iterations × ~2k tokens, the total could reach 8k+ per request. Monitor usage and add a token budget guard if costs become a concern.
-3. **Tool output size** — `analyze_history` can return a long analytics block. If the context grows too large, later LLM calls may degrade. Consider trimming tool results to a max character count before injecting.
-4. **Caching** — If the user asks the same question twice, both tool calls will re-execute. Short-lived caching (TTL ~5 min) on `analyze_history` results (keyed by user_id + question hash) could reduce cost.
-5. **Agent evaluation** — Measuring whether the agent picked the right tools and produced a grounded answer is harder than measuring RAG recall. A test set of labelled (question → expected tools + key facts) pairs is needed before production.
+1. **Token budget across turns** — Each loop iteration consumes tokens. With 4 iterations × ~2k tokens, the total could reach 8k+ per request. Monitor usage and add a token budget guard if costs become a concern.
+2. **Tool output size** — `analyze_history` can return a long analytics block. If the context grows too large, later LLM calls may degrade. The current 4 000-char trim is a heuristic; tune if needed.
+3. **Agent evaluation** — Measuring whether the agent picked the right tools and produced a grounded answer is harder than measuring RAG recall. A test set of labelled (question → expected tools + key facts) pairs is needed before production.
+4. **Roster expansion** — Adding a new athlete currently requires editing `app/agent/roster.py` and re-deploying. A DB-backed roster (coach–athlete relationship model) would be more flexible.

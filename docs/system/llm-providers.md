@@ -1,6 +1,6 @@
 # LLM Providers
 
-**Version:** 0.1.0 | **Last updated:** 2026-05-11
+**Last updated:** 2026-05-12
 
 ## Supported Providers
 
@@ -36,12 +36,14 @@ DEFAULT_EMBEDDING_PROVIDER=openai  # for vector embeddings
 Or select per-request in code:
 
 ```python
-from app.llm.factory import build_provider
+from app.llm.factory import get_step_provider
 from app.core.config import LLMProvider, settings
 
-provider = build_provider(LLMProvider.GEMINI, settings)
+provider = get_step_provider(LLMProvider.GEMINI, settings)
 response = await provider.complete(messages)
 ```
+
+For pipeline steps with per-step routing (RAG classifier, rewriter, generator, etc.), use `get_step_provider(cfg.rag_classifier_provider, cfg)` — it falls back to `default_llm_provider` when the step-specific override is `None`.
 
 ## Prompt Caching (Anthropic)
 

@@ -1,6 +1,6 @@
 # Feature 2 — Workout History Analysis
 
-**Version:** v1.1 | **Status:** Planned | **Last updated:** 2026-05-12
+**Status:** Implemented | **Last updated:** 2026-05-12
 
 ---
 
@@ -215,8 +215,11 @@ Response `201`:
 
 ### Analyse history
 
+Both endpoints accept the same request body. The streaming variant (`/stream`) returns SSE events (`token`, `done`, `error`) instead of a single JSON response.
+
 ```http
 POST /api/v1/workout/analyze
+POST /api/v1/workout/analyze/stream   ← SSE streaming variant
 Authorization: Bearer <token>
 ```
 
@@ -246,9 +249,24 @@ Response `200`:
     "deload_weeks_detected": 0,
     "insufficient_data": false
   },
+  "question_type": "TREND",
+  "focus": "Bench Press",
   "model": "anthropic/claude-sonnet-4-5",
   "usage": { "prompt_tokens": 620, "completion_tokens": 280, "total_tokens": 900 }
 }
+```
+
+`question_type` is classified by a lightweight LLM step before generation:
+
+| Value | Meaning |
+|-------|---------|
+| `TREND` | Progress / improvement over time for a specific exercise |
+| `BALANCE` | Push/pull or muscle group imbalance |
+| `NEGLECT` | Exercises or muscles not trained enough |
+| `PLAN` | Recommendation for next training block |
+| `GENERAL` | Any other question about workout history |
+
+`focus` is the specific exercise or muscle group the question targets, or `null` for general questions.
 ```
 
 ---
