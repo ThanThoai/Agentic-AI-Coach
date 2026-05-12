@@ -1,4 +1,4 @@
-import type { AgentResponse } from "@/types/chat";
+import type { AgentResponse, AgentToolCall } from "@/types/chat";
 import { extractApiMessage } from "./errors";
 
 const API_BASE = "";
@@ -35,6 +35,7 @@ interface AgentStreamDone {
   type: "done";
   answer: string;
   tools_used: string[];
+  tool_calls: AgentToolCall[];
   iterations: number;
   usage: AgentResponse["usage"];
 }
@@ -43,7 +44,7 @@ export async function askAgentStream(
   question: string,
   token: string,
   onToken: (token: string) => void,
-  onStatus?: (tools: string[]) => void,
+  onStatus?: (tools: Array<{ name: string; input: Record<string, unknown> }>) => void,
 ): Promise<AgentResponse> {
   const res = await fetch(`${API_BASE}/api/v1/agent/ask/stream`, {
     method: "POST",
@@ -76,7 +77,7 @@ export async function askAgentStream(
       try {
         const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
         if (data.type === "token") onToken(data.content as string);
-        else if (data.type === "status") onStatus?.(data.tools as string[]);
+        else if (data.type === "status") onStatus?.(data.tools as Array<{ name: string; input: Record<string, unknown> }>);
         else if (data.type === "done") donePayload = data as unknown as AgentStreamDone;
         else if (data.type === "ping") { /* keepalive — ignore */ }
         else if (data.type === "error") throw new AgentError(500, String(data.message ?? "Stream error"));
@@ -90,6 +91,7 @@ export async function askAgentStream(
   return {
     answer: donePayload.answer,
     tools_used: donePayload.tools_used,
+    tool_calls: donePayload.tool_calls ?? [],
     iterations: donePayload.iterations,
     usage: donePayload.usage,
   };

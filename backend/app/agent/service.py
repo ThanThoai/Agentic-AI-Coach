@@ -101,9 +101,10 @@ class AgentService:
             raise TimeoutError from None
 
     async def run(self, question: str, user_id: uuid.UUID) -> dict[str, Any]:
-        """Run the agent loop and return a dict with answer, tools_used, usage."""
+        """Run the agent loop; returns answer, tools_used, tool_calls, usage."""
         messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
         tools_used: list[str] = []
+        tool_calls_detail: list[dict[str, Any]] = []
         total_usage = TokenUsage()
 
         for iteration in range(self._max_iterations):
@@ -136,6 +137,7 @@ class AgentService:
                 return {
                     "answer": answer,
                     "tools_used": tools_used,
+                    "tool_calls": tool_calls_detail,
                     "iterations": iteration + 1,
                     "usage": total_usage,
                 }
@@ -153,7 +155,13 @@ class AgentService:
                         user_id=str(user_id),
                     )
                     raise AgentError("tool_timeout")
-                tools_used.extend(name for name, _ in results)
+                for tc, (name, result) in zip(tool_calls, results):
+                    tools_used.append(name)
+                    tool_calls_detail.append({
+                        "name": name,
+                        "input": tc.input,
+                        "result_chars": len(result),
+                    })
 
                 messages.append(
                     {
@@ -177,12 +185,13 @@ class AgentService:
         """ReAct loop with SSE events.
 
         Yields:
-          {"type": "status", "tools": ["rag_search", ...]}  — before each tool batch
-          {"type": "token",  "content": "..."}              — chars of the final answer
-          {"type": "done",   "answer": ..., ...}            — after all tokens
+          status — before each tool batch, includes tool name + input params
+          token  — content chars of the final answer
+          done   — after all tokens, includes tool_calls list with result_chars
         """
         messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
         tools_used: list[str] = []
+        tool_calls_detail: list[dict[str, Any]] = []
         total_usage = TokenUsage()
 
         for iteration in range(self._max_iterations):
@@ -244,6 +253,7 @@ class AgentService:
                     "type": "done",
                     "answer": answer,
                     "tools_used": tools_used,
+                    "tool_calls": tool_calls_detail,
                     "iterations": iteration + 1,
                     "usage": total_usage.model_dump(),
                 }
@@ -253,7 +263,13 @@ class AgentService:
                 tool_calls = _extract_tool_calls(response.content_blocks)
                 tool_names = [tc.name for tc in tool_calls]
 
-                yield {"type": "status", "tools": tool_names}
+                yield {
+                    "type": "status",
+                    "tools": [
+                        {"name": tc.name, "input": tc.input}
+                        for tc in tool_calls
+                    ],
+                }
 
                 # ── Tool execution (with keepalive) ───────────────────────────
                 results: list[tuple[str, str]] | None = None
@@ -280,7 +296,13 @@ class AgentService:
                     return
 
                 assert results is not None
-                tools_used.extend(name for name, _ in results)
+                for tc, (name, result) in zip(tool_calls, results):
+                    tools_used.append(name)
+                    tool_calls_detail.append({
+                        "name": name,
+                        "input": tc.input,
+                        "result_chars": len(result),
+                    })
 
                 messages.append(
                     {

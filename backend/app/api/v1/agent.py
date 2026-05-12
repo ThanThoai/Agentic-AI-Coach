@@ -56,6 +56,7 @@ async def ask_agent(
     return AgentResponse(
         answer=result["answer"],
         tools_used=result["tools_used"],
+        tool_calls=result.get("tool_calls", []),
         iterations=result["iterations"],
         usage=result["usage"],
     )

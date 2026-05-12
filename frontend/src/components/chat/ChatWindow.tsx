@@ -200,7 +200,7 @@ export function ChatWindow() {
             setMessages(prev => prev.map(m => {
               if (m.id !== assistantId) return m;
               const steps = (m.pipelineSteps ?? []).map(s => ({ ...s, status: "done" as const }));
-              const toolStep = { label: tools.join(", "), status: "done" as const };
+              const toolStep = { label: tools.map(t => t.name).join(", "), status: "done" as const };
               return { ...m, pipelineSteps: [...steps, toolStep] };
             }));
           },

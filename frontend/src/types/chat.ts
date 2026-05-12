@@ -72,15 +72,24 @@ export interface WorkoutDataSummary {
 export interface WorkoutAnalysisResponse {
   answer: string;
   data_summary: WorkoutDataSummary;
+  question_type?: string;
+  focus?: string | null;
   model: string | null;
   usage: TokenUsage | null;
 }
 
 // ── Agent types ───────────────────────────────────────────────────────────────
 
+export interface AgentToolCall {
+  name: string;
+  input: Record<string, unknown>;
+  result_chars: number;
+}
+
 export interface AgentResponse {
   answer: string;
   tools_used: string[];
+  tool_calls: AgentToolCall[];
   iterations: number;
   usage: TokenUsage;
 }
