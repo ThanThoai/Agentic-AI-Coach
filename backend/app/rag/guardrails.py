@@ -208,8 +208,16 @@ async def classify_intent(
 
 def parse_llm_output(raw: str, num_chunks: int) -> tuple[str, list[int]]:
     """Parse the LLM's JSON response; fall back to raw text on parse failure."""
+    cleaned = raw.strip()
+    # Strip markdown code fences so models that wrap JSON in ```json...``` still parse
+    if cleaned.startswith("```"):
+        first_newline = cleaned.find("\n")
+        if first_newline != -1:
+            cleaned = cleaned[first_newline + 1:].strip()
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].rstrip()
     try:
-        data = json.loads(raw.strip())
+        data = json.loads(cleaned)
         answer = str(data["answer"])
         indices = [int(i) for i in data.get("cited_indices", [])]
         return answer, indices

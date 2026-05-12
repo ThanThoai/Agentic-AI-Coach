@@ -49,6 +49,13 @@ def check_out_of_scope_message(answer: str) -> bool:
         r"out of scope",
         r"can only help with",
         r"cannot help with",
+        r"do not cover",
+        r"don.t cover",
+        r"not covered",
+        r"don.t have.*information",
+        r"no information.*on that",
+        r"i can help with",  # matches OUT_OF_SCOPE_MESSAGE "I can help with:"
+        r"feel free to ask",  # matches OUT_OF_SCOPE_MESSAGE footer
     ]
     lower = answer.lower()
     return any(re.search(p, lower) for p in patterns)
