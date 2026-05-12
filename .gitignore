@@ -5,4 +5,13 @@ knowledge-base/*
 sample-data/*
 
 *.pyc
-.env.testfrontend/.env.local
+.env.test
+
+# Frontend build artifacts
+frontend/.env.local
+frontend/.next/
+frontend/node_modules/
+
+# Backend
+backend/.venv/
+backend/__pycache__/
