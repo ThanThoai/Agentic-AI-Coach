@@ -37,7 +37,7 @@ class DemoTokenResponse(BaseModel):
 )
 async def get_demo_token(user_name: str) -> DemoTokenResponse:
     """Returns a signed JWT for a named demo user. Production: always 404."""
-    if settings.app_env == "production":
+    if settings.app_env == "production" and not settings.enable_demo_token:
         raise HTTPException(status_code=404)
 
     entry = DEMO_USERS.get(user_name.lower())

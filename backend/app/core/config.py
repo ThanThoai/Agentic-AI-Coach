@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     app_env: AppEnv = AppEnv.DEVELOPMENT
     log_level: str = "INFO"
     allowed_origins: list[str] = ["http://localhost:3000"]
+    # Allow demo-token endpoint in production for UI testing (default off)
+    enable_demo_token: bool = False
 
     # Auth
     jwt_secret: SecretStr
