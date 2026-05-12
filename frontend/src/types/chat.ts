@@ -13,6 +13,41 @@ export interface TokenUsage {
   cache_read_tokens?: number;
 }
 
+export interface GuardrailL1Trace {
+  status: "passed" | "blocked";
+  block_reason: string | null;
+}
+
+export interface GuardrailL2Trace {
+  status: "run" | "skipped";
+  intent: string | null;
+  reason: string | null;
+}
+
+export interface QueryProcessorTrace {
+  query_type: string;
+  sub_questions: string[];
+}
+
+export interface RetrievalTrace {
+  results_per_query: number[];
+  total_merged: number;
+}
+
+export interface ContextTrace {
+  strategy: string;
+  conflict_count: number;
+  chunks_used: number;
+}
+
+export interface PipelineTrace {
+  guardrail_l1: GuardrailL1Trace;
+  guardrail_l2: GuardrailL2Trace | null;
+  query_processor: QueryProcessorTrace | null;
+  retrieval: RetrievalTrace | null;
+  context: ContextTrace | null;
+}
+
 export interface RAGResponse {
   answer: string;
   in_scope: boolean;
@@ -20,6 +55,7 @@ export interface RAGResponse {
   intent: string | null;
   model: string | null;
   usage: TokenUsage | null;
+  trace: PipelineTrace | null;
 }
 
 export type MessageRole = "user" | "assistant";

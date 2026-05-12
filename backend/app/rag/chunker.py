@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import logging
+import structlog
 from dataclasses import replace
 
 import tiktoken
 
 from app.rag.parser import ParsedChunk
 
-logger = logging.getLogger("rag.chunker")
+logger = structlog.get_logger("rag.chunker")
 
 MIN_TOKENS = 50
 MAX_TOKENS = 512

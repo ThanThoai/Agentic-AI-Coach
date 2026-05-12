@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { Message, PipelineStep, RAGResponse } from "@/types/chat";
-import { queryRAG, RAGError } from "@/lib/api/rag";
+import { queryRAGStream, RAGError } from "@/lib/api/rag";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
 
@@ -27,29 +27,56 @@ function finaliseSteps(
   steps: PipelineStep[],
   response: RAGResponse,
 ): PipelineStep[] {
+  const trace = response.trace;
   return steps.map((s, i) => {
-    // Layer 2 (index 1) is "skipped" if the response didn't go through intent classification
-    // We infer this by checking if in_scope is true and intent is not a risk label
-    if (i === 1) {
-      const riskLabels = ["MEDICAL_REFUSE", "EATING_RISK", "OUT_OF_SCOPE", "BORDERLINE"];
-      const hasRisk = response.intent && riskLabels.includes(response.intent);
-      return {
-        ...s,
-        status: hasRisk ? "done" : "skipped",
-        detail: hasRisk ? response.intent ?? undefined : "no risk signals",
-      };
+    switch (i) {
+      case 0: {
+        const l1 = trace?.guardrail_l1;
+        if (l1?.status === "blocked") {
+          return { ...s, status: "done", detail: `blocked: ${l1.block_reason}` };
+        }
+        return { ...s, status: "done", detail: "passed" };
+      }
+      case 1: {
+        const l2 = trace?.guardrail_l2;
+        if (!l2 || l2.status === "skipped") {
+          return { ...s, status: "skipped", detail: "no risk signals" };
+        }
+        return { ...s, status: "done", detail: l2.intent ?? undefined };
+      }
+      case 2: {
+        const qp = trace?.query_processor;
+        if (!qp) return { ...s, status: "done" };
+        const n = qp.sub_questions.length;
+        return {
+          ...s,
+          status: "done",
+          detail: `${qp.query_type} · ${n} sub-question${n !== 1 ? "s" : ""}`,
+        };
+      }
+      case 3: {
+        const r = trace?.retrieval;
+        if (!r) return { ...s, status: "done" };
+        return { ...s, status: "done", detail: `${r.total_merged} chunks merged` };
+      }
+      case 4: {
+        const ctx = trace?.context;
+        if (!ctx) return { ...s, status: "done" };
+        const conflictNote = ctx.conflict_count > 0
+          ? ` · ${ctx.conflict_count} conflict${ctx.conflict_count !== 1 ? "s" : ""}`
+          : "";
+        return {
+          ...s,
+          status: "done",
+          detail: `${ctx.strategy} · ${ctx.chunks_used} chunks${conflictNote}`,
+        };
+      }
+      case 5:
+        if (!response.in_scope) return { ...s, status: "skipped" };
+        return { ...s, status: "done", detail: response.model ?? undefined };
+      default:
+        return { ...s, status: "done" };
     }
-    if (i === 2 && response.intent) {
-      return { ...s, status: "done", detail: response.intent };
-    }
-    if (i === 3 && response.sources.length > 0) {
-      return {
-        ...s,
-        status: "done",
-        detail: `${response.sources.length} chunk${response.sources.length !== 1 ? "s" : ""} retrieved`,
-      };
-    }
-    return { ...s, status: "done" };
   });
 }
 
@@ -110,7 +137,18 @@ export function ChatWindow() {
     );
 
     try {
-      const response: RAGResponse = await queryRAG(text);
+      const response = await queryRAGStream(
+        text,
+        (token) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id !== assistantId
+                ? m
+                : { ...m, content: m.content + token },
+            ),
+          );
+        },
+      );
 
       timersRef.current.forEach(clearTimeout);
 

@@ -510,7 +510,8 @@ async def assemble_context(
     provider: BaseLLMProvider | None = None,
     conflict_model: str | None = None,
     max_tokens: int = MAX_CONTEXT_TOKENS,
-) -> tuple[str, list[AssembledChunk]]:
+) -> tuple[str, list[AssembledChunk], str, int]:
+    """Returns (context, used_chunks, strategy, conflict_count)."""
     chunks    = _build_assembled_chunks(results_per_query)
     conflicts = await detect_conflicts(chunks, provider, model=conflict_model)
     strategy  = select_chain_strategy(query_type)
@@ -525,4 +526,4 @@ async def assemble_context(
     if conflicts:
         context += _build_conflict_note(conflicts)
 
-    return context, used
+    return context, used, strategy, len(conflicts)
