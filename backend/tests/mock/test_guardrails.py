@@ -10,6 +10,8 @@ from app.rag.guardrails import (
     MEDICAL_DISCLAIMER,
     MAX_ANSWER_LENGTH,
     ClassificationResult,
+    MEDICAL_CONDITION_TERMS,
+    INJURY_REPORT_PATTERNS,
     classify_intent,
     contains_medical_advice,
     filter_output,
@@ -129,6 +131,49 @@ class TestNeedsIntentClassification:
 
     def test_no_trigger_on_programming_question(self):
         assert needs_intent_classification("What is progressive overload?") is False
+
+    # ── Medical condition terms (Change 2A) ───────────────────────────────────
+
+    def test_triggers_on_herniated_disc(self):
+        assert needs_intent_classification("I have a herniated disc in my lower back. What exercises should I do?") is True
+
+    def test_triggers_on_acl(self):
+        assert needs_intent_classification("I have a torn ACL. What lower body exercises can I safely do?") is True
+
+    def test_triggers_on_scoliosis(self):
+        assert needs_intent_classification("I was diagnosed with scoliosis. How should I modify my squat?") is True
+
+    def test_triggers_on_stress_fracture(self):
+        assert needs_intent_classification("I have a stress fracture in my shin.") is True
+
+    def test_triggers_on_rotator_cuff(self):
+        assert needs_intent_classification("My rotator cuff has been bothering me during overhead press.") is True
+
+    def test_triggers_on_meniscus(self):
+        assert needs_intent_classification("I have a meniscus tear — can I still squat?") is True
+
+    def test_triggers_on_plantar_fasciitis(self):
+        assert needs_intent_classification("I have plantar fasciitis. Can I run?") is True
+
+    def test_triggers_on_arthritis(self):
+        assert needs_intent_classification("I have arthritis in my knees.") is True
+
+    # ── Injury-report sentence patterns (Change 2B) ───────────────────────────
+
+    def test_triggers_on_injury_in_back(self):
+        assert needs_intent_classification("I have a problem in my lower back.") is True
+
+    def test_triggers_on_diagnosed_by_doctor(self):
+        assert needs_intent_classification("I was told by a doctor I have a condition.") is True
+
+    def test_no_trigger_on_normal_stiffness(self):
+        # "stiff" still triggers BORDERLINE via LAYER2_TRIGGER_PATTERNS — that is intentional;
+        # L2 will classify it as BORDERLINE, not MEDICAL_REFUSE.
+        # This test confirms the *trigger* fires (L2 is invoked), not that it blocks.
+        assert needs_intent_classification("My lower back is a bit stiff after deadlifts.") is True
+
+    def test_no_trigger_on_standard_question(self):
+        assert needs_intent_classification("What is blood flow restriction training?") is False
 
 
 # ── Layer 2: classify_intent ──────────────────────────────────────────────────

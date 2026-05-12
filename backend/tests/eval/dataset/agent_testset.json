@@ -57,5 +57,31 @@
       "answer_not_empty": true,
       "iterations_max": 3
     }
+  },
+  {
+    "id": "agent-06",
+    "category": "agent",
+    "question": "How has Alex's squat progressed this week?",
+    "expected_tools": ["analyze_history"],
+    "expected_answer": "Alex's squat sessions this week show his recent working weights and volume.",
+    "pass_criteria": {
+      "tools_used_match": true,
+      "answer_not_empty": true,
+      "iterations_max": 2,
+      "date_range_resolved": true
+    }
+  },
+  {
+    "id": "agent-07",
+    "category": "agent",
+    "question": "What did Binh train last month?",
+    "expected_tools": ["analyze_history"],
+    "expected_answer": "Last month Binh's training covered the exercises recorded in that calendar month.",
+    "pass_criteria": {
+      "tools_used_match": true,
+      "answer_not_empty": true,
+      "iterations_max": 2,
+      "date_range_resolved": true
+    }
   }
 ]

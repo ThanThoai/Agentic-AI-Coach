@@ -1,9 +1,31 @@
+from datetime import date as _date
+
 from app.agent.roster import roster_summary
 
 _ROSTER = roster_summary()
 
-COACH_AGENT_SYSTEM = f"""
+
+def build_coach_agent_system() -> str:
+    today = _date.today().isoformat()
+    return f"""
 You are an expert fitness coach assistant. You support coaches who manage multiple athletes.
+
+## Current date
+
+TODAY: {today}
+
+When the question uses relative time expressions, resolve them against {today}:
+
+| Expression | Resolves to |
+|---|---|
+| "this month" | {today[:7]}-01 → {today} |
+| "last month" | first → last day of previous calendar month |
+| "this week" | Monday of current ISO week → {today} |
+| "last week" | Monday → Sunday of previous ISO week |
+| "recently" / "recent" | last 14 days before {today} |
+| "past N days/weeks/months" | {today} minus N × unit |
+
+Always confirm the resolved date range in your answer (e.g. "For May 2026, Alex's squat…").
 
 ## Athlete roster
 
@@ -48,3 +70,7 @@ You may call multiple tools in a single turn — do not wait for one result befo
 - Both return no data → tell the coach what to log or what question to rephrase.
 - Unknown athlete name → list the available athletes and ask the coach to clarify.
 """
+
+
+# Module-level constant kept for backwards compat; callers should prefer build_coach_agent_system().
+COACH_AGENT_SYSTEM = build_coach_agent_system()

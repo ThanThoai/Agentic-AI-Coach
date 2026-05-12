@@ -11,12 +11,23 @@ from app.core.config import Settings
 from app.core.config import settings as _settings
 from app.llm.base import AgentLLMResponse, ContentBlock, TokenUsage, ToolCall
 from app.llm.factory import get_step_provider
+from app.prompts.agent import build_coach_agent_system
 
-from app.prompts.agent import COACH_AGENT_SYSTEM
 from .tool_schemas import TOOL_SCHEMAS
-from .tools import execute_tools
+from .tools import dispatch_tool
 
 log = structlog.get_logger(__name__)
+
+# Per-tool-type execution timeouts (seconds).
+# Aggregation / time-series tools need more headroom than simple lookups.
+TOOL_TIMEOUTS: dict[str, float] = {
+    "analyze_history": 90.0,
+    "rag_search": 60.0,
+    "_default": 45.0,
+}
+
+MAX_TOOL_RETRIES = 2
+_RETRYABLE_ERRORS = (asyncio.TimeoutError, OSError, ConnectionError)
 
 
 class AgentError(Exception):
@@ -65,16 +76,46 @@ class AgentService:
                 model=self._model,
                 max_tokens=1024,
                 temperature=0.3,
-                system=COACH_AGENT_SYSTEM,
+                system=build_coach_agent_system(),
             ),
             timeout=self._llm_timeout,
         )
 
+    async def _dispatch_one(self, tc: ToolCall) -> tuple[str, str]:
+        """Execute one tool with per-type timeout and retry on transient errors."""
+        timeout = TOOL_TIMEOUTS.get(tc.name, TOOL_TIMEOUTS["_default"])
+        last_exc: BaseException | None = None
+        for attempt in range(1, MAX_TOOL_RETRIES + 1):
+            try:
+                result = await asyncio.wait_for(dispatch_tool(tc), timeout=timeout)
+                return tc.name, result
+            except _RETRYABLE_ERRORS as exc:
+                last_exc = exc
+                if attempt < MAX_TOOL_RETRIES:
+                    log.info(
+                        "agent.tool.retry",
+                        tool=tc.name,
+                        attempt=attempt,
+                        err_type=type(exc).__name__,
+                    )
+                    await asyncio.sleep(0.5 * 2 ** attempt)
+        msg = f"tool '{tc.name}' failed after {MAX_TOOL_RETRIES} attempts"
+        raise TimeoutError(msg) from last_exc
+
     async def _tool_call(self, tool_calls: list[ToolCall]) -> list[tuple[str, str]]:
-        return await asyncio.wait_for(
-            execute_tools(tool_calls),
-            timeout=self._tool_timeout,
+        results = await asyncio.gather(
+            *[self._dispatch_one(tc) for tc in tool_calls],
+            return_exceptions=True,
         )
+        processed: list[tuple[str, str]] = []
+        for tc, r in zip(tool_calls, results):
+            if isinstance(r, tuple):
+                processed.append(r)
+            elif isinstance(r, _RETRYABLE_ERRORS):
+                raise TimeoutError(str(r)) from r
+            else:
+                processed.append((tc.name, f"ERROR: {type(r).__name__}: {r}"))
+        return processed
 
     async def _run_with_keepalive(
         self,
@@ -205,7 +246,7 @@ class AgentService:
                         model=self._model,
                         max_tokens=1024,
                         temperature=0.3,
-                        system=COACH_AGENT_SYSTEM,
+                        system=build_coach_agent_system(),
                     ),
                     timeout=self._llm_timeout,
                 ):
@@ -272,11 +313,16 @@ class AgentService:
                 }
 
                 # ── Tool execution (with keepalive) ───────────────────────────
+                # Use max per-tool timeout for the keepalive outer bound.
+                max_timeout = max(
+                    TOOL_TIMEOUTS.get(tc.name, TOOL_TIMEOUTS["_default"])
+                    for tc in tool_calls
+                ) * MAX_TOOL_RETRIES
                 results: list[tuple[str, str]] | None = None
                 try:
                     async for _event in self._run_with_keepalive(
-                        execute_tools(tool_calls),
-                        timeout=self._tool_timeout,
+                        self._tool_call(tool_calls),
+                        timeout=max_timeout,
                     ):
                         if isinstance(_event, dict):
                             yield _event      # forward ping to client

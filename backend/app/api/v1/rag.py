@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import AsyncIterator
 from functools import lru_cache
-from typing import AsyncIterator
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from app.llm.base import BaseLLMProvider, LLMMessage, LLMResponse
-from app.llm.factory import PipelineProviders, get_default_embedder, get_default_llm
-from app.prompts.generation import GENERATION_STREAM_SYSTEM, GENERATION_SYSTEM, SYNTHESIS_INSTRUCTION
+from app.llm.factory import PipelineProviders
+from app.prompts.generation import (
+    GENERATION_STREAM_SYSTEM,
+    GENERATION_SYSTEM,
+    SYNTHESIS_INSTRUCTION,
+)
+from app.rag.grounding_check import enforce_grounding
 from app.rag.guardrails import (
     BORDERLINE_DISCLAIMER,
     OUT_OF_SCOPE_MESSAGE,
@@ -62,7 +68,7 @@ async def generate(
     return await provider.complete(
         messages=[LLMMessage(role="user", content=question)],
         system=full_system,
-        max_tokens=512,
+        max_tokens=350,
         temperature=0.2,
         model=model,
     )
@@ -83,7 +89,7 @@ async def generate_stream(
     async for token in provider.stream(
         messages=[LLMMessage(role="user", content=question)],
         system=full_system,
-        max_tokens=512,
+        max_tokens=350,
         temperature=0.2,
         model=model,
     ):
@@ -102,7 +108,7 @@ def _map_sources(
             section_title = used_chunks[i - 1].section_title,
             source_file   = used_chunks[i - 1].source_file,
             score         = used_chunks[i - 1].score,
-            excerpt       = used_chunks[i - 1].text[:200] + "...",
+            excerpt       = used_chunks[i - 1].text[:600] + "...",
         )
         for i in cited_indices
         if 1 <= i <= len(used_chunks)
@@ -255,15 +261,55 @@ async def query_rag(
         completion_tokens=llm_response.usage.completion_tokens,
     )
 
+    # ── Grounding check — skip for BORDERLINE (those answers need INFERRED content) ─
+    raw_answer = llm_response.content
+    if not was_borderline:
+        try:
+            from app.rag.guardrails import parse_llm_output as _parse
+            parsed_answer, _ = _parse(raw_answer, len(used_chunks))
+            grounded = await enforce_grounding(
+                parsed_answer, context, providers.generation, model=providers.generation_model
+            )
+            # Re-wrap as JSON so filter_output can parse it normally
+            import json as _json
+            raw_answer = _json.dumps({"answer": grounded, "cited_indices": list(range(1, len(used_chunks) + 1))})
+        except Exception:
+            log.warning("rag.grounding_check.skipped", exc_info=True)
+
     # ── Layer 3: output filter ────────────────────────────────────────────────
     answer, cited_indices = filter_output(
-        llm_response.content,
+        raw_answer,
         num_chunks=len(used_chunks),
         was_borderline=was_borderline,
     )
 
     if was_borderline:
         answer += BORDERLINE_DISCLAIMER
+
+    # ── No-coverage detection: if generation admitted sources don't cover the topic ─
+    # return the standard OOS message rather than a low-quality unhelpful answer
+    _NO_COVERAGE_RE = re.compile(
+        r"(do not cover|don.t cover|not covered|available sources do not|"
+        r"sources don.t (contain|have|include)|"
+        r"no (information|content) (on|about|for) this|"
+        r"not (available|found) in (my |the )?(knowledge|source))",
+        re.IGNORECASE,
+    )
+    if not was_borderline and _NO_COVERAGE_RE.search(answer):
+        log.info("rag.no_coverage_detected")
+        return RAGResponse(
+            answer=OUT_OF_SCOPE_MESSAGE,
+            in_scope=False,
+            sources=[],
+            intent=query_type,
+            trace=PipelineTrace(
+                guardrail_l1=l1_trace,
+                guardrail_l2=l2_trace,
+                query_processor=qp_trace,
+                retrieval=retrieval_trace,
+                context=context_trace,
+            ),
+        )
 
     # ── Source mapping ────────────────────────────────────────────────────────
     sources = _map_sources(used_chunks, cited_indices)

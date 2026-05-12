@@ -15,9 +15,16 @@ Classify the user query into exactly one of five labels:
                    goals, or beginner safety concerns. Answer is allowed; add a light
                    safety note.
 
-  MEDICAL_REFUSE — The query involves a diagnosed medical condition, post-surgical
-                   recovery, prescription medication, or an injury requiring clinical
-                   assessment. Do not answer; redirect to a healthcare professional.
+  MEDICAL_REFUSE — The query describes a specific medical condition, injury, or
+                   diagnosis that requires professional medical evaluation before
+                   exercise guidance can be given safely. This includes: named
+                   structural injuries (herniated disc, ACL tear, stress fracture,
+                   labral tear, meniscus damage), diagnosed conditions (scoliosis,
+                   arthritis, tendinitis), post-surgical recovery, or prescription
+                   medication questions. Do NOT apply to: general muscle soreness,
+                   typical DOMS, standard fatigue after training, or mild stiffness
+                   without a named condition. Do not answer; redirect to a healthcare
+                   professional.
 
   EATING_RISK    — The query implies disordered eating patterns, extreme caloric
                    restriction (< 1 000 kcal/day), an unrealistic weight-loss
@@ -58,6 +65,18 @@ Query: "I was diagnosed with Type 2 diabetes. What exercises are safe for me?"
 
 Query: "Can I train with a herniated disc in my lumbar spine?"
 {"intent": "MEDICAL_REFUSE", "reason": "Spinal injury requires medical assessment before any exercise programming"}
+
+Query: "I have a herniated disc in my lower back. What exercises should I do?"
+{"intent": "MEDICAL_REFUSE", "reason": "Named structural spinal condition requires professional assessment before exercise programming"}
+
+Query: "I have a torn ACL. What lower body exercises can I safely do?"
+{"intent": "MEDICAL_REFUSE", "reason": "Ligament injury requires clinical evaluation — not safe to prescribe exercises without clearance"}
+
+Query: "I was diagnosed with scoliosis. How should I modify my squat?"
+{"intent": "MEDICAL_REFUSE", "reason": "Diagnosed spinal condition — modification requires physiotherapist assessment"}
+
+Query: "My lower back is a bit stiff after deadlifts. Any stretches?"
+{"intent": "BORDERLINE", "reason": "Normal post-training stiffness without a named condition — answer with mobility cues and conservative advice"}
 
 Query: "How do I eat only 800 calories a day and still train hard?"
 {"intent": "EATING_RISK", "reason": "Extreme caloric restriction well below safe minimum — redirect to dietitian"}

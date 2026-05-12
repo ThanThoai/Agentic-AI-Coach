@@ -93,8 +93,8 @@
     "athlete": "alex",
     "question_type_expected": "GENERAL",
     "question": "Analyse Alex's training over the past 100 days.",
-    "date_from_offset_days": -100,
-    "date_to_offset_days": -90,
+    "date_from_offset_days": -120,
+    "date_to_offset_days": -110,
     "expected_answer": "There is insufficient workout data for Alex in the requested period. Please log at least 2 sessions before requesting an analysis.",
     "pass_criteria": {
       "insufficient_data": true,
