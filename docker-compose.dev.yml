@@ -1,0 +1,48 @@
+# Development override — hot reload for backend, pnpm dev for frontend.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Or use scripts/dev.sh for the shortcut.
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        APP_ENV: development
+    environment:
+      APP_ENV: development
+    ports:
+      - "8000:8000"
+    # Mount source so uvicorn --reload picks up file changes
+    volumes:
+      - ./backend:/app
+      - ./knowledge-base:/app/knowledge-base:ro
+    command:
+      - uv
+      - run
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    command: ["pnpm", "dev"]
+    depends_on:
+      backend:
+        condition: service_healthy
