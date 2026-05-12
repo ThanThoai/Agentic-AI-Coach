@@ -176,106 +176,118 @@ binary classifier case.
 
 ## Prompt examples
 
-### Example 1 — TREND question
+### Example 1 — TREND question (User A)
 
-**User question:** "What's my bench press trend over the last month?"
+**User question:** "What's my bench press trend over the last 3 months?"
 
 **Context injected (excerpt):**
 ```
 Bench Press (chest)
-  Sessions: 8  |  Avg volume/session: 2 100 kg  |  Max weight: 100 kg
-  Trend (week-over-week): +8.0 %  ↑ Progressive
-  Last trained: 2026-05-10
+  Sessions: 12  |  Avg volume/session: 2 520 kg  |  Max weight: 100 kg
+  Trend (week-over-week): +8.5 %  ↑ Progressive
+  Last trained: 2026-03-19
+
+--- DELOAD WEEKS ---
+2026-W05 (Jan 27–29): total volume ~5 900 kg  (-26 % vs 4-week avg)
+  → Bench Press: 60 kg (-20 % vs normal 75 kg)
 ```
 
 **Expected answer:**
 ```markdown
-Your Bench Press has been **progressing well** over the past month.
+Your Bench Press has shown **strong progressive overload** over the 3-month period.
 
-- You trained it **8 times** — roughly twice per week.
-- Your average session volume is **2 100 kg** and it has grown **+8% week-over-week**.
-- Your current max weight is **100 kg**, which suggests consistent progressive overload.
+- You trained it **12 times** — roughly once per week on your push days.
+- Average session volume is **2 520 kg** with a **+8.5% week-over-week trend** — consistently improving.
+- Your peak recorded weight is **100 kg**.
 
-**Recommendation:** The trend is healthy. Keep adding small increments (1–2.5 kg) on your top sets each session to maintain momentum.
+**Deload note:** Week 5 (Jan 27–29) shows intentional reduced load — Bench Press dropped to **60 kg** from your typical **75–80 kg**. This is expected recovery, not a regression.
+
+**Recommendation:** The trend is excellent. Continue adding **2.5 kg** to your top sets every 1–2 sessions to sustain the momentum.
 ```
 
 ---
 
-### Example 2 — BALANCE question
+### Example 2 — BALANCE question (User B)
 
 **User question:** "Am I overtraining chest compared to back?"
 
 **Context injected (excerpt):**
 ```
-chest:  8 sessions  |  total 16 800 kg  |  1.5 sessions/week
-back:   5 sessions  |  total  9 000 kg  |  1.0 sessions/week
+chest:  10 sessions  |  total 22 500 kg  |  2.5 sessions/week
+back:    4 sessions  |  total  5 600 kg  |  1.0 sessions/week
 
-Push / Pull ratio: 1.6  (push-dominant)
-Chest / Back ratio: 1.87
+Bench Press (chest)
+  Sessions: 10  |  Max weight: 60 kg (normalised from 130 lb)
+
+Push / Pull ratio: 2.2  (push-dominant)
+Chest / Back ratio: 4.0
 ```
 
 **Expected answer:**
 ```markdown
-Yes — your data shows a **significant chest-to-back imbalance**.
+Yes — your data reveals a **severe chest-to-back imbalance**.
 
-- **Chest volume:** 16 800 kg over 8 sessions (1.5×/week)
-- **Back volume:** 9 000 kg over 5 sessions (1.0×/week)
-- **Ratio:** your chest volume is **1.87× your back volume** — ideal is close to 1.0.
-- Your **push/pull ratio is 1.6** — push-dominant.
+- **Chest volume:** 22 500 kg over **10 sessions** (2.5×/week)
+- **Back volume:** 5 600 kg over **4 sessions** (1.0×/week)
+- **Chest / Back ratio: 4.0** — you are doing 4× more chest volume than back. Ideal is close to **1:1**.
+- **Push / Pull ratio: 2.2** — significantly push-dominant.
 
-**Risk:** Over time this imbalance can contribute to shoulder impingement and poor posture.
+**Risk:** This pattern commonly leads to rounded shoulders, tight pecs, and elevated injury risk (shoulder impingement, rotator cuff strain) over time.
 
-**Recommendation:** Add 1–2 back sessions per week (rows, face pulls, lat pulldowns) until the ratio approaches 1:1.
+**Recommendation:**
+- Match every chest session with a dedicated back session (rows, Face Pulls, lat pulldowns, Pull-Ups).
+- Target a chest/back ratio below **1.3** within the next training cycle.
 ```
 
 ---
 
-### Example 3 — NEGLECT question
+### Example 3 — NEGLECT question (User B)
 
-**User question:** "Which exercises am I neglecting?"
+**User question:** "Which muscle groups am I neglecting?"
 
 **Context injected (excerpt):**
 ```
 --- NEGLECTED MUSCLES (> 14 days) ---
 core (last trained: never in this period)
-shoulders (last trained: 2026-04-22 — 20 days ago)
+legs (last trained: 2026-02-14 — 30 days ago)
 ```
 
 **Expected answer:**
 ```markdown
-Based on the last 30 days, **two muscle groups** have been neglected:
+Based on the analysed period, **two muscle groups** have been neglected:
 
 - **Core** — not trained at all in the analysed period.
-- **Shoulders** — last trained **20 days ago** (2026-04-22), which exceeds the 14-day threshold.
+- **Legs** — last trained **30 days ago** (2026-02-14), well past the 14-day threshold. Only **2 squat sessions** appear in your entire 3-month history.
 
 **Recommendation:**
+- Add **2 × leg sessions** per week: Squat, Romanian Deadlift, or Leg Press.
 - Add **2 × core sessions** per week: planks, hanging leg raises, or ab wheel rollouts.
-- Reintroduce **shoulder work** (overhead press, lateral raises) at least once per week.
+- Leg training also supports hormonal response (testosterone, GH) that benefits all other lifts.
 ```
 
 ---
 
 ### Example 4 — Insufficient data
 
-**User question:** "What's my squat trend?"
+**User question:** "What's my deadlift trend?"
 
 **Context injected:**
 ```
 ⚠ Data note: Only 1 session analysed. Trend confidence: insufficient.
 
-Squat (legs)
-  Sessions: 1  |  Max weight: 100 kg
+Deadlift (back)
+  Sessions: 1  |  Max weight: 140 kg
   Trend: insufficient data (< 2 sessions)
-  Last trained: 2026-05-11
+  Last trained: 2026-03-14
 ```
 
 **Expected answer:**
 ```markdown
-I don't have enough Squat history to identify a trend — only **1 session** appears in the selected time window.
+I don't have enough Deadlift history to identify a trend — only **1 session** appears in the selected time window.
 
-To track progression, log at least **2–3 Squat sessions** and re-run the analysis.
+To track progression, log at least **2–3 Deadlift sessions** and re-run the analysis.
 
-What I can tell you: your current max recorded weight is **100 kg**.
+What I can tell you: your current max recorded weight is **140 kg**.
 ```
 
 ---
@@ -368,6 +380,8 @@ async def analyse_workout(
 
     # 4. Build structured context text (ordered by question_type and focus)
     context = build_llm_context(summary, question_type=question_type, focus=focus)
+    # build_llm_context signature: (summary, question_type="GENERAL", focus=None) → str
+    # see analytics.md for full output format including DELOAD WEEKS section
 
     # 5. Generate answer (Sonnet)
     llm_response = await generate_analysis(
@@ -392,4 +406,7 @@ async def analyse_workout(
         model=llm_response.model,
         usage=llm_response.usage,
     )
+
+# Note: DataSummary.deload_weeks_detected = len(summary.deload_weeks)
+# e.g. User A's 3-month history produces deload_weeks_detected=1 (ISO week 2026-W05)
 ```
