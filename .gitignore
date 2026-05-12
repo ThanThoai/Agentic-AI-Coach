@@ -5,6 +5,7 @@ knowledge-base/*
 sample-data/*
 
 *.pyc
+.env
 .env.test
 
 # Frontend build artifacts

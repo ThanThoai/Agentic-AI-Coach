@@ -9,6 +9,7 @@ from typing import Literal
 import tiktoken
 
 from app.llm.base import BaseLLMProvider, LLMMessage
+from app.prompts.conflict import CONFLICT_CHECK_SYSTEM
 from app.rag.query_processor import QueryType
 from app.rag.sparse import build_sparse_vector
 from app.vectordb.qdrant import QdrantVectorDB, SearchResult
@@ -416,16 +417,7 @@ _CONTRADICTION_PATTERNS: list[tuple[re.Pattern[str], re.Pattern[str]]] = [
     (re.compile(r"\bcauses?\b"),       re.compile(r"\bdoes not cause\b|doesn't cause\b")),
 ]
 
-_CONFLICT_CHECK_SYSTEM = """\
-Compare two fitness knowledge excerpts.
-Determine if they make mutually contradictory factual claims — claims that
-cannot both be true for the same population and goal.
-
-Different recommendations for different populations (beginner vs advanced)
-or different goals (strength vs hypertrophy) are NOT contradictions.
-Only flag hard factual contradictions (e.g. "X increases Y" vs "X decreases Y").
-
-Return JSON only: {"conflict": true | false, "topic": "<one short phrase or empty>"}"""
+_CONFLICT_CHECK_SYSTEM = CONFLICT_CHECK_SYSTEM
 
 
 def _heuristic_conflict(a: AssembledChunk, b: AssembledChunk) -> bool:
@@ -460,6 +452,7 @@ async def _llm_conflict_check(
     a: AssembledChunk,
     b: AssembledChunk,
     provider: BaseLLMProvider,
+    model: str | None = None,
 ) -> ConflictPair | None:
     prompt = f"Excerpt A:\n{a.text[:400]}\n\nExcerpt B:\n{b.text[:400]}"
     resp = await provider.complete(
@@ -467,6 +460,7 @@ async def _llm_conflict_check(
         system=_CONFLICT_CHECK_SYSTEM,
         max_tokens=60,
         temperature=0.0,
+        model=model,
     )
     try:
         data = json.loads(_extract_json_block(resp.content))
@@ -481,6 +475,7 @@ async def _llm_conflict_check(
 async def detect_conflicts(
     chunks: list[AssembledChunk],
     provider: BaseLLMProvider | None = None,
+    model: str | None = None,
 ) -> list[ConflictPair]:
     candidates = detect_conflicts_heuristic(chunks)
     if not candidates or provider is None:
@@ -488,7 +483,7 @@ async def detect_conflicts(
 
     by_index = {c.index: c for c in chunks}
     results = await asyncio.gather(*[
-        _llm_conflict_check(by_index[cp.chunk_a_index], by_index[cp.chunk_b_index], provider)
+        _llm_conflict_check(by_index[cp.chunk_a_index], by_index[cp.chunk_b_index], provider, model)
         for cp in candidates
     ])
     return [r for r in results if r is not None]
@@ -513,10 +508,11 @@ async def assemble_context(
     sub_questions: list[str],
     query_type: QueryType,
     provider: BaseLLMProvider | None = None,
+    conflict_model: str | None = None,
     max_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> tuple[str, list[AssembledChunk]]:
     chunks    = _build_assembled_chunks(results_per_query)
-    conflicts = await detect_conflicts(chunks, provider)
+    conflicts = await detect_conflicts(chunks, provider, model=conflict_model)
     strategy  = select_chain_strategy(query_type)
 
     if strategy == "compare":

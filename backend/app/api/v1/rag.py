@@ -7,7 +7,8 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.llm.base import BaseLLMProvider, LLMMessage, LLMResponse
-from app.llm.factory import get_default_embedder, get_default_llm
+from app.llm.factory import PipelineProviders, get_default_embedder, get_default_llm
+from app.prompts.generation import GENERATION_SYSTEM, SYNTHESIS_INSTRUCTION
 from app.rag.guardrails import (
     BORDERLINE_DISCLAIMER,
     OUT_OF_SCOPE_MESSAGE,
@@ -30,24 +31,7 @@ router = APIRouter(prefix="/rag", tags=["rag"])
 
 # ── Generation prompts ────────────────────────────────────────────────────────
 
-GENERATION_SYSTEM_PROMPT = """\
-You are a fitness coach assistant. Answer questions using ONLY the information
-provided in the numbered context sections below.
-
-Rules:
-1. Base every claim on the context. Cite sources using [N] inline.
-2. If the context does not contain enough information to answer, say:
-   "I don't have specific information about that in my knowledge base."
-3. If the question is not about fitness, training, exercise, or nutrition, say:
-   "This question is outside my fitness knowledge scope."
-4. Do not use external knowledge beyond what is in the context.
-5. Return your response as JSON: { "answer": "...", "cited_indices": [1, 3] }"""
-
-SYNTHESIS_INSTRUCTION = (
-    "\n\nThe context above covers multiple sub-topics. Synthesise a unified answer "
-    "that addresses all parts of the question. Cite sources for each distinct "
-    "sub-claim using [N] notation."
-)
+GENERATION_SYSTEM_PROMPT = GENERATION_SYSTEM
 
 # ── Generation ────────────────────────────────────────────────────────────────
 
@@ -56,6 +40,7 @@ async def generate(
     context: str,
     query_type: QueryType,
     provider: BaseLLMProvider,
+    model: str | None = None,
 ) -> LLMResponse:
     system = GENERATION_SYSTEM_PROMPT
     if query_type in ("COMPLEX", "COMPARISON"):
@@ -67,6 +52,7 @@ async def generate(
         system=full_system,
         max_tokens=512,
         temperature=0.2,
+        model=model,
     )
 
 
@@ -75,6 +61,7 @@ async def generate_stream(
     context: str,
     query_type: QueryType,
     provider: BaseLLMProvider,
+    model: str | None = None,
 ) -> AsyncIterator[str]:
     system = GENERATION_SYSTEM_PROMPT
     if query_type in ("COMPLEX", "COMPARISON"):
@@ -86,6 +73,7 @@ async def generate_stream(
         system=full_system,
         max_tokens=512,
         temperature=0.2,
+        model=model,
     ):
         yield token
 
@@ -111,12 +99,9 @@ def _map_sources(
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
-def get_llm_provider() -> BaseLLMProvider:
-    return get_default_llm()
-
-
-def get_embedding_provider() -> BaseLLMProvider:
-    return get_default_embedder()
+def get_pipeline_providers() -> PipelineProviders:
+    from app.core.config import settings
+    return PipelineProviders(settings)
 
 
 @lru_cache
@@ -151,8 +136,7 @@ _OUT_OF_SCOPE_RESPONSE = RAGResponse(
 @router.post("/query", response_model=RAGResponse)
 async def query_rag(
     payload: RAGQuery,
-    llm: BaseLLMProvider = Depends(get_llm_provider),
-    embedder: BaseLLMProvider = Depends(get_embedding_provider),
+    providers: PipelineProviders = Depends(get_pipeline_providers),
     qdrant: QdrantVectorDB = Depends(get_qdrant),
 ) -> RAGResponse:
     question = payload.question
@@ -166,7 +150,9 @@ async def query_rag(
     # ── Layer 2: LLM intent classifier (triggered only for risk signals) ─────
     was_borderline = False
     if needs_intent_classification(question):
-        classification = await classify_intent(question, llm)
+        classification = await classify_intent(
+            question, providers.guardrail, model=providers.guardrail_model
+        )
         intent_label = classification.intent
 
         if intent_label == "MEDICAL_REFUSE":
@@ -190,12 +176,18 @@ async def query_rag(
         intent_label = None
 
     # ── Query processing ──────────────────────────────────────────────────────
-    query_type, sub_questions = await process_query(question, llm)
+    query_type, sub_questions = await process_query(
+        question,
+        providers.classifier,
+        classifier_model=providers.classifier_model,
+        rewrite_model=providers.rewrite_model,
+        rewrite_provider=providers.rewrite,
+    )
     log.info("rag.query_processed", query_type=query_type, num_sub_questions=len(sub_questions))
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
     results_per_query, merged = await retrieve(
-        sub_questions, query_type, embedder, qdrant,
+        sub_questions, query_type, providers.embedder, qdrant,
         max_sources=payload.max_sources,
     )
 
@@ -209,11 +201,16 @@ async def query_rag(
     # ── Context assembly ──────────────────────────────────────────────────────
     context, used_chunks = await assemble_context(
         results_per_query, sub_questions, query_type,
-        provider=llm,
+        provider=providers.conflict,
+        conflict_model=providers.conflict_model,
     )
 
     # ── Generation ────────────────────────────────────────────────────────────
-    llm_response = await generate(question, context, query_type, llm)
+    llm_response = await generate(
+        question, context, query_type,
+        providers.generation,
+        model=providers.generation_model,
+    )
     log.info(
         "rag.generated",
         model=llm_response.model,

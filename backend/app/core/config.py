@@ -29,10 +29,6 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     allowed_origins: list[str] = ["http://localhost:3000"]
 
-    # Database
-    database_url: str
-    redis_url: str = "redis://localhost:6379/0"
-
     # Auth
     jwt_secret: SecretStr
     jwt_algorithm: str = "HS256"
@@ -47,9 +43,33 @@ class Settings(BaseSettings):
     qdrant_collection_knowledge: str = "knowledge_base"
     qdrant_collection_workouts: str = "workout_embeddings"
 
-    # LLM routing
+    # LLM routing — global defaults
     default_llm_provider: LLMProvider = LLMProvider.ANTHROPIC
     default_embedding_provider: LLMProvider = LLMProvider.OPENAI
+
+    # RAG pipeline — per-step model routing
+    # provider: None → falls back to default_llm_provider
+    # model:    None → falls back to the provider's own default_model
+
+    # Step 1: L2 intent classifier (lightweight, runs only on risk signals)
+    rag_guardrail_provider: LLMProvider | None = None
+    rag_guardrail_model: str | None = None
+
+    # Step 2: query type classifier (SIMPLE / COMPLEX / COMPARISON)
+    rag_classifier_provider: LLMProvider | None = None
+    rag_classifier_model: str | None = None
+
+    # Step 3: query rewriter + decomposer
+    rag_rewrite_provider: LLMProvider | None = None
+    rag_rewrite_model: str | None = None
+
+    # Step 4: conflict detection LLM re-check (optional, runs on candidate pairs)
+    rag_conflict_provider: LLMProvider | None = None
+    rag_conflict_model: str | None = None
+
+    # Step 5: final answer generation (most quality-sensitive step)
+    rag_generation_provider: LLMProvider | None = None
+    rag_generation_model: str | None = None
 
     # Anthropic
     anthropic_api_key: SecretStr | None = None
