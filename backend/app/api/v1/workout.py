@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user, get_db
@@ -70,6 +72,31 @@ async def analyze_workout(
     service: WorkoutService = Depends(get_workout_service),
 ) -> WorkoutAnalysisResponse:
     return await service.analyse(user_id, payload)
+
+
+@router.post(
+    "/analyze/stream",
+    summary="Analyse workout history with AI (streaming)",
+)
+async def analyze_workout_stream(
+    payload: WorkoutAnalysisRequest,
+    user_id: uuid.UUID = Depends(get_current_user),
+    service: WorkoutService = Depends(get_workout_service),
+) -> StreamingResponse:
+    async def _events():
+        try:
+            async for event in service.analyse_stream(user_id, payload):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception:
+            log.exception("workout.stream.error", user_id=str(user_id))
+            msg = {"type": "error", "message": "An error occurred while generating the response."}
+            yield f"data: {json.dumps(msg)}\n\n"
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get(
