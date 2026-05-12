@@ -3,8 +3,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { Message, PipelineStep, RAGResponse, CommandMode, DemoUser } from "@/types/chat";
 import { queryRAGStream, RAGError } from "@/lib/api/rag";
-import { analyzeWorkout, WorkoutError } from "@/lib/api/workout";
-import { askAgent, AgentError } from "@/lib/api/agent";
+import { analyzeWorkoutStream, WorkoutError } from "@/lib/api/workout";
+import { askAgentStream, AgentError } from "@/lib/api/agent";
 import { fetchDemoToken } from "@/lib/api/auth";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
@@ -187,7 +187,24 @@ export function ChatWindow() {
     try {
       if (mode === "agent") {
         if (!user || !isCoach) throw new AgentError(403, "Only coaches can use the agent.");
-        const response = await askAgent(text, user.access_token);
+        const response = await askAgentStream(
+          text,
+          user.access_token,
+          (token) => {
+            setMessages(prev => prev.map(m =>
+              m.id !== assistantId ? m : { ...m, content: m.content + token, isLoading: false }
+            ));
+          },
+          (tools) => {
+            timersRef.current.forEach(clearTimeout);
+            setMessages(prev => prev.map(m => {
+              if (m.id !== assistantId) return m;
+              const steps = (m.pipelineSteps ?? []).map(s => ({ ...s, status: "done" as const }));
+              const toolStep = { label: tools.join(", "), status: "done" as const };
+              return { ...m, pipelineSteps: [...steps, toolStep] };
+            }));
+          },
+        );
         timersRef.current.forEach(clearTimeout);
         updateMessage(assistantId, {
           content: response.answer,
@@ -197,7 +214,15 @@ export function ChatWindow() {
         });
       } else if (mode === "analysis") {
         if (!user) throw new WorkoutError(401, "No user selected");
-        const response = await analyzeWorkout(text, user.access_token);
+        const response = await analyzeWorkoutStream(
+          text,
+          user.access_token,
+          (token) => {
+            setMessages(prev => prev.map(m =>
+              m.id !== assistantId ? m : { ...m, content: m.content + token, isLoading: false }
+            ));
+          },
+        );
         timersRef.current.forEach(clearTimeout);
         updateMessage(assistantId, {
           content: response.answer,
