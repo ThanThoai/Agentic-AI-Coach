@@ -1,0 +1,58 @@
+# Production override — gunicorn backend, built Next.js, nginx reverse proxy.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Required env vars (in backend/.env or shell environment):
+#   PUBLIC_URL          — public-facing URL, e.g. https://yourdomain.com
+#   GUNICORN_WORKERS    — number of gunicorn workers (default: 4)
+#
+# Or use scripts/prod.sh for the shortcut.
+
+services:
+  backend:
+    environment:
+      APP_ENV: production
+    command:
+      - uv
+      - run
+      - gunicorn
+      - app.main:app
+      - -k
+      - uvicorn.workers.UvicornWorker
+      - -w
+      - "${GUNICORN_WORKERS:-4}"
+      - --bind
+      - "0.0.0.0:8000"
+      - --timeout
+      - "120"
+      - --keepalive
+      - "5"
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+    # Don't expose port directly — nginx handles external traffic
+    ports: []
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_URL:-http://localhost}
+    ports: []   # nginx handles external traffic
+
+  # ── nginx reverse proxy ──────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro   # place fullchain.pem + privkey.pem here for HTTPS
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started

@@ -8,8 +8,13 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Copy dependency files first for layer caching
 COPY pyproject.toml uv.lock ./
 
-# Sync dependencies (no dev deps in production)
-RUN uv sync --frozen --no-dev
+# Build arg: "development" installs dev deps too (needed for test/lint containers)
+ARG APP_ENV=production
+RUN if [ "$APP_ENV" = "development" ]; then \
+        uv sync --frozen; \
+    else \
+        uv sync --frozen --no-dev; \
+    fi
 
 # Copy application code
 COPY . .
@@ -20,4 +25,13 @@ COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Default: production (gunicorn). Overridden in docker-compose.dev.yml.
+CMD ["uv", "run", "gunicorn", "app.main:app", \
+     "-k", "uvicorn.workers.UvicornWorker", \
+     "-w", "4", \
+     "--bind", "0.0.0.0:8000", \
+     "--timeout", "120", \
+     "--keepalive", "5", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]
