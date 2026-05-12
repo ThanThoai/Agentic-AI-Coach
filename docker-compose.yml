@@ -41,15 +41,11 @@ services:
     restart: unless-stopped
     env_file: ./backend/.env
     environment:
-      # Override localhost URLs with docker-network hostnames
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       QDRANT_URL: http://qdrant:6333
       ALLOWED_ORIGINS: '["http://localhost:3000"]'
       JWT_SECRET: ${JWT_SECRET}
-    # Run migrations then start server
-    command: >
-      sh -c "uv run alembic upgrade head &&
-             uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    # entrypoint runs `alembic upgrade head` then executes CMD
     ports:
       - "8000:8000"
     depends_on:
@@ -66,6 +62,8 @@ services:
       retries: 10
 
   # ── Seed (run once: docker compose --profile seed up seed) ──────────────────
+  # The shared entrypoint runs migrations (idempotent) then the seed script.
+  # Depends on backend being healthy so we know migrations already completed.
 
   seed:
     build:
@@ -76,7 +74,7 @@ services:
     env_file: ./backend/.env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-    command: uv run python -m scripts.seed_demo
+    command: ["uv", "run", "python", "-m", "scripts.seed_demo"]
     depends_on:
       backend:
         condition: service_healthy
