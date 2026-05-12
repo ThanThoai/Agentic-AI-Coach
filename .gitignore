@@ -5,4 +5,4 @@ knowledge-base/*
 sample-data/*
 
 *.pyc
-.env.test
+.env.testfrontend/.env.local
