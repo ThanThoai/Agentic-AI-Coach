@@ -125,6 +125,8 @@ export interface Message {
   role: MessageRole;
   content: string;
   commandMode?: CommandMode;
+  /** For analysis messages: the user whose token was used to fetch the data. */
+  dataOwner?: { key: string; name: string };
   ragResponse?: RAGResponse;
   workoutResponse?: WorkoutAnalysisResponse;
   pipelineSteps?: PipelineStep[];
