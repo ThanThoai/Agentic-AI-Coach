@@ -1,8 +1,8 @@
 .claude/command/*
 !.claude/command/.gitkeep
 !.claude/command/README.md
-knowledge-base/*
-sample-data/*
+# knowledge-base/*
+# sample-data/*
 
 *.pyc
 .env
