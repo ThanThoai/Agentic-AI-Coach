@@ -76,17 +76,33 @@ export interface WorkoutAnalysisResponse {
   usage: TokenUsage | null;
 }
 
+// ── Agent types ───────────────────────────────────────────────────────────────
+
+export interface AgentResponse {
+  answer: string;
+  tools_used: string[];
+  iterations: number;
+  usage: TokenUsage;
+}
+
 // ── User / command types ──────────────────────────────────────────────────────
+
+export type UserRole = "athlete" | "coach";
 
 export interface DemoUser {
   user_id: string;
   access_token: string;
   name: string;
-  /** "alex" | "binh" */
+  /** "alex" | "binh" | "coach" */
   key: string;
+  role: UserRole;
 }
 
-export type CommandMode = "question" | "analysis";
+/** Fixed athlete users the coach can select as target */
+export const ATHLETE_KEYS = ["alex", "binh"] as const;
+export type AthleteKey = (typeof ATHLETE_KEYS)[number];
+
+export type CommandMode = "question" | "analysis" | "agent";
 
 export interface SlashCommand {
   name: string;
@@ -125,10 +141,11 @@ export interface Message {
   role: MessageRole;
   content: string;
   commandMode?: CommandMode;
-  /** For analysis messages: the user whose token was used to fetch the data. */
+  /** For analysis / agent messages: the athlete whose data was queried. */
   dataOwner?: { key: string; name: string };
   ragResponse?: RAGResponse;
   workoutResponse?: WorkoutAnalysisResponse;
+  agentResponse?: AgentResponse;
   pipelineSteps?: PipelineStep[];
   isLoading?: boolean;
   error?: string;
