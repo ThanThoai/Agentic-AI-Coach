@@ -105,6 +105,11 @@ class Settings(BaseSettings):
     openrouter_conflict_model: str = "anthropic/claude-haiku-4-5"
     openrouter_generation_model: str = "anthropic/claude-sonnet-4-5"
 
+    # Agent (Feature 3) — coach assist agent
+    agent_provider: LLMProvider | None = None   # None → default_llm_provider
+    agent_model: str | None = None              # None → provider's default_model
+    agent_max_iterations: int = 4
+
     # Workout analysis — per-step model routing
     # provider: None → falls back to default_llm_provider
     # model:    None → falls back to the provider's own default_model

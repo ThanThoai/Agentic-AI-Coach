@@ -1,13 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import type { PipelineStep, PipelineTrace, RAGResponse } from "@/types/chat";
+import type { AgentResponse, PipelineStep, PipelineTrace, RAGResponse } from "@/types/chat";
 import { Spinner } from "@/components/ui/Spinner";
 
 interface Props {
   steps: PipelineStep[];
   ragResponse?: RAGResponse;
   isLoading: boolean;
+  isAgent?: boolean;
+  agentResponse?: AgentResponse;
 }
 
 const QUERY_TYPE_COLOR: Record<string, string> = {
@@ -117,18 +119,18 @@ function TraceDetail({ index, trace }: { index: number; trace: PipelineTrace }) 
   }
 }
 
-export function ThinkingPanel({ steps, ragResponse, isLoading }: Props) {
+export function ThinkingPanel({ steps, ragResponse, isLoading, isAgent, agentResponse }: Props) {
   const [open, setOpen] = useState(false);
   const trace = ragResponse?.trace ?? null;
 
   const doneCount = steps.filter((s) => s.status === "done").length;
   const queryType = trace?.query_processor?.query_type ?? ragResponse?.intent;
   const label = isLoading
-    ? `Processing… (${doneCount}/${steps.length})`
-    : "View pipeline steps";
+    ? `${isAgent ? "Agent running" : "Processing"}… (${doneCount}/${steps.length})`
+    : isAgent ? "View agent steps" : "View pipeline steps";
 
   return (
-    <div className="mb-2 rounded-lg border border-white/10 bg-white/5 text-sm overflow-hidden">
+    <div className={`mb-2 rounded-lg border text-sm overflow-hidden ${isAgent ? "border-purple-500/20 bg-purple-950/20" : "border-white/10 bg-white/5"}`}>
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-gray-400 hover:text-gray-200 transition-colors"
@@ -213,6 +215,22 @@ export function ThinkingPanel({ steps, ragResponse, isLoading }: Props) {
                   {ragResponse.sources.length !== 1 ? "s" : ""}
                 </div>
               )}
+            </div>
+          )}
+          {!isLoading && isAgent && agentResponse && (
+            <div className="mt-3 pt-2 border-t border-purple-500/20 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-500">
+              <div>
+                <span className="text-gray-400">Iterations</span>{" "}
+                {agentResponse.iterations}
+              </div>
+              <div>
+                <span className="text-gray-400">Tokens</span>{" "}
+                {agentResponse.usage.total_tokens.toLocaleString()}
+              </div>
+              <div className="col-span-2">
+                <span className="text-gray-400">Tools called</span>{" "}
+                {[...new Set(agentResponse.tools_used)].join(", ") || "none"}
+              </div>
             </div>
           )}
         </div>

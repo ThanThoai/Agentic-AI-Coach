@@ -2,7 +2,16 @@ from typing import AsyncIterator
 
 import anthropic
 
-from app.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, TokenUsage
+from app.llm.base import (
+    AgentLLMResponse,
+    BaseLLMProvider,
+    ContentBlock,
+    LLMMessage,
+    LLMResponse,
+    TokenUsage,
+    ToolCall,
+    ToolDefinition,
+)
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -89,4 +98,62 @@ class AnthropicProvider(BaseLLMProvider):
         raise NotImplementedError(
             "Anthropic does not provide an embeddings API. "
             "Use DEFAULT_EMBEDDING_PROVIDER=openai or gemini."
+        )
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[ToolDefinition],
+        *,
+        model: str | None = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.3,
+        system: str | None = None,
+    ) -> AgentLLMResponse:
+        kwargs: dict = dict(
+            model=model or self._default_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            messages=messages,
+            tools=[
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                }
+                for t in tools
+            ],
+            tool_choice={"type": "auto"},
+        )
+        if system:
+            kwargs["system"] = [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ]
+
+        resp = await self._client.messages.create(**kwargs)
+
+        blocks: list[ContentBlock] = []
+        for block in resp.content:
+            if block.type == "text":
+                blocks.append(ContentBlock(type="text", text=block.text))
+            elif block.type == "tool_use":
+                blocks.append(
+                    ContentBlock(
+                        type="tool_use",
+                        tool_call=ToolCall(id=block.id, name=block.name, input=block.input),
+                    )
+                )
+
+        usage = resp.usage
+        return AgentLLMResponse(
+            stop_reason=resp.stop_reason or "end_turn",
+            content_blocks=blocks,
+            model=resp.model,
+            provider=self.provider_name,
+            usage=TokenUsage(
+                prompt_tokens=usage.input_tokens,
+                completion_tokens=usage.output_tokens,
+                total_tokens=usage.input_tokens + usage.output_tokens,
+                cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+            ),
         )

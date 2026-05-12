@@ -15,9 +15,10 @@ from app.core.config import settings
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 # Fixed stable UUIDs for demo users
-DEMO_USERS: dict[str, tuple[uuid.UUID, str]] = {
-    "alex": (uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "Alex"),
-    "binh": (uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), "Binh"),
+DEMO_USERS: dict[str, tuple[uuid.UUID, str, str]] = {
+    "alex":  (uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "Alex",  "athlete"),
+    "binh":  (uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), "Binh",  "athlete"),
+    "coach": (uuid.UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"), "Coach", "coach"),
 }
 
 
@@ -26,6 +27,7 @@ class DemoTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     name: str
+    role: str
 
 
 @router.get(
@@ -42,10 +44,11 @@ async def get_demo_token(user_name: str) -> DemoTokenResponse:
     if entry is None:
         raise HTTPException(status_code=404, detail=f"Unknown demo user: {user_name!r}")
 
-    user_id, name = entry
+    user_id, name, role = entry
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
+        "role": role,
         "iat": now,
         "exp": now + timedelta(days=7),
     }
@@ -54,4 +57,4 @@ async def get_demo_token(user_name: str) -> DemoTokenResponse:
         settings.jwt_secret.get_secret_value(),
         algorithm=settings.jwt_algorithm,
     )
-    return DemoTokenResponse(user_id=str(user_id), access_token=token, name=name)
+    return DemoTokenResponse(user_id=str(user_id), access_token=token, name=name, role=role)
