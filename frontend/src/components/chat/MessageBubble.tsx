@@ -2,7 +2,7 @@
 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Message } from "@/types/chat";
+import type { Message, WorkoutDataSummary } from "@/types/chat";
 import { ThinkingPanel } from "./ThinkingPanel";
 import { SourceList } from "./SourceList";
 import { Spinner } from "@/components/ui/Spinner";
@@ -23,6 +23,7 @@ export function MessageBubble({ message }: Props) {
   }
 
   const isStreaming = !!message.isLoading && !!message.content;
+  const isAnalysis = message.commandMode === "analysis";
 
   return (
     <div className="flex justify-start">
@@ -62,11 +63,71 @@ export function MessageBubble({ message }: Props) {
           )}
         </div>
 
-        {/* Sources */}
-        {message.ragResponse?.sources && message.ragResponse.sources.length > 0 && !message.isLoading && (
+        {/* Analysis data summary panel */}
+        {isAnalysis && message.workoutResponse && !message.isLoading && (
+          <DataSummaryPanel summary={message.workoutResponse.data_summary} />
+        )}
+
+        {/* RAG sources */}
+        {!isAnalysis && message.ragResponse?.sources && message.ragResponse.sources.length > 0 && !message.isLoading && (
           <SourceList sources={message.ragResponse.sources} />
         )}
       </div>
+    </div>
+  );
+}
+
+function DataSummaryPanel({ summary }: { summary: WorkoutDataSummary }) {
+  if (summary.insufficient_data) {
+    return (
+      <div className="mt-2 rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">
+        Not enough workout data in the selected date range to run a full analysis.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3">
+      <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-gray-600">
+        Data used
+      </p>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
+        <StatRow label="Sessions" value={String(summary.sessions_analysed)} />
+        <StatRow label="Exercises" value={String(summary.exercises_found)} />
+        <StatRow
+          label="Date range"
+          value={`${summary.date_range.from} → ${summary.date_range.to}`}
+          wide
+        />
+        <StatRow
+          label="Muscle groups"
+          value={summary.muscle_groups_found.join(", ") || "—"}
+          wide
+        />
+        {summary.deload_weeks_detected > 0 && (
+          <StatRow
+            label="Deload weeks"
+            value={String(summary.deload_weeks_detected)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StatRow({
+  label,
+  value,
+  wide,
+}: {
+  label: string;
+  value: string;
+  wide?: boolean;
+}) {
+  return (
+    <div className={wide ? "col-span-2" : ""}>
+      <span className="text-gray-500">{label}: </span>
+      <span className="text-gray-300">{value}</span>
     </div>
   );
 }
