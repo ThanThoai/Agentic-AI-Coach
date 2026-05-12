@@ -15,6 +15,66 @@ Store workout history in a queryable relational structure that:
 
 ---
 
+## API input schema
+
+The API accepts **flat per-exercise entries** (not pre-grouped sessions). Grouping by date
+happens in the service layer. This matches how users log naturally — one exercise at a time.
+
+```python
+# backend/app/schemas/workout.py
+
+class SetInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reps:   int   = Field(..., ge=1, le=200)
+    weight: float = Field(..., ge=0, le=1000)
+    unit:   str   = Field(...)   # "kg" or "lb" (case-insensitive); "lb" not "lbs"
+
+    @field_validator("unit")
+    @classmethod
+    def validate_unit(cls, v: str) -> str:
+        normalised = v.strip().lower()
+        if normalised not in ("kg", "lb", "kilogram", "kilograms", "pound", "pounds"):
+            raise ValueError(f"Unknown unit {v!r}. Use 'kg' or 'lb'.")
+        return normalised
+
+
+class WorkoutEntryInput(BaseModel):
+    """One exercise in one calendar day. The service groups entries by date."""
+    model_config = ConfigDict(extra="forbid")
+    date:     date = Field(...)
+    exercise: str  = Field(..., min_length=1, max_length=100)
+    sets:     list[SetInput] = Field(..., min_length=1, max_length=20)
+
+
+# POST /api/v1/workout/log accepts a list of these
+WorkoutLogRequest = list[WorkoutEntryInput]   # 1–500 entries
+```
+
+### Service layer: grouping entries by date
+
+Before any DB write, the service groups the flat list into sessions:
+
+```python
+def group_entries_by_date(
+    entries: list[WorkoutEntryInput],
+) -> dict[date, list[WorkoutEntryInput]]:
+    """Group flat exercise entries into per-day buckets.
+
+    Multiple entries for the same date become one session.
+    Entries are ordered by their position in the input list (preserves user order).
+    """
+    from collections import defaultdict
+    groups: dict[date, list[WorkoutEntryInput]] = defaultdict(list)
+    for entry in entries:
+        groups[entry.date].append(entry)
+    return dict(sorted(groups.items()))  # ascending date order
+```
+
+The service then calls `normalize_weight` and `classify_exercise` on each entry
+before building ORM objects and upserting via the repository.
+
+---
+
 ## Schema
 
 Three tables form a strict parent-child hierarchy:
