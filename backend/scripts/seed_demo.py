@@ -501,7 +501,7 @@ async def ensure_user(session: AsyncSession, user_id: uuid.UUID, name: str) -> N
             "INSERT INTO users (id, name) VALUES (:id, :name) "
             "ON CONFLICT (id) DO NOTHING"
         ),
-        {"id": str(user_id), "name": name},
+        {"id": user_id, "name": name},
     )
 
 
@@ -514,31 +514,31 @@ async def seed_user_sessions(
     exercises_inserted = 0
 
     for session_date, exercises in raw_sessions:
-        # Check for existing session
+        # Check for existing session — pass date object, not string
         existing = await session.execute(
             text(
                 "SELECT id FROM workout_sessions "
                 "WHERE user_id = :uid AND date = :d AND deleted_at IS NULL"
             ),
-            {"uid": str(user_id), "d": str(session_date)},
+            {"uid": user_id, "d": session_date},
         )
         row = existing.fetchone()
         if row:
             session_id = row[0]
         else:
-            session_id = str(uuid.uuid4())
+            session_id = uuid.uuid4()
             await session.execute(
                 text(
                     "INSERT INTO workout_sessions (id, user_id, date) "
                     "VALUES (:id, :uid, :d)"
                 ),
-                {"id": session_id, "uid": str(user_id), "d": str(session_date)},
+                {"id": session_id, "uid": user_id, "d": session_date},
             )
             sessions_inserted += 1
 
         for order_idx, (exercise_name, sets) in enumerate(exercises):
             muscle_group = classify_muscle_group(exercise_name)
-            exercise_id = str(uuid.uuid4())
+            exercise_id = uuid.uuid4()
             await session.execute(
                 text(
                     "INSERT INTO workout_exercises "
@@ -547,7 +547,7 @@ async def seed_user_sessions(
                 ),
                 {
                     "id": exercise_id,
-                    "sid": str(session_id),
+                    "sid": session_id,
                     "name": exercise_name,
                     "mg": muscle_group,
                     "oi": order_idx,
@@ -564,7 +564,7 @@ async def seed_user_sessions(
                         "VALUES (:id, :eid, :sn, :r, :w)"
                     ),
                     {
-                        "id": str(uuid.uuid4()),
+                        "id": uuid.uuid4(),
                         "eid": exercise_id,
                         "sn": set_num,
                         "r": reps,
