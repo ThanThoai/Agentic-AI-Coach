@@ -12,6 +12,8 @@ services:
         APP_ENV: development
     environment:
       APP_ENV: development
+    ports:
+      - "8000:8000"
     # Mount source so uvicorn --reload picks up file changes
     volumes:
       - ./backend:/app

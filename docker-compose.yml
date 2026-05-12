@@ -27,7 +27,7 @@ services:
       - "6333:6333"
       - "6334:6334"   # gRPC
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333' 2>/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -46,8 +46,7 @@ services:
       ALLOWED_ORIGINS: '["http://localhost:3000"]'
       JWT_SECRET: ${JWT_SECRET}
     # entrypoint runs `alembic upgrade head` then executes CMD
-    ports:
-      - "8000:8000"
+    # No ports here — dev exposes 8000 via docker-compose.dev.yml; prod uses nginx
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,7 +55,7 @@ services:
     volumes:
       - ./knowledge-base:/app/knowledge-base:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" 2>/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -88,8 +87,7 @@ services:
       args:
         NEXT_PUBLIC_API_URL: http://localhost:8000
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    # No ports here — dev exposes 3000 via docker-compose.dev.yml; prod uses nginx
     depends_on:
       backend:
         condition: service_healthy
