@@ -80,7 +80,7 @@ status)
 ingest)
     info "Running knowledge base ingestion..."
     # Run inside the backend container (migrations already applied)
-    docker compose exec backend uv run python -m app.rag.ingestion
+    $COMPOSE exec backend uv run python -m app.rag.ingestion
     info "Ingestion complete."
     ;;
 
