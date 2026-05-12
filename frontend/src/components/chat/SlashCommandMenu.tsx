@@ -6,15 +6,18 @@ import { SLASH_COMMANDS } from "@/types/chat";
 interface SlashCommandMenuProps {
   query: string;
   onSelect: (cmd: SlashCommand) => void;
+  commands?: SlashCommand[];
 }
 
 const MODE_ICON: Record<string, string> = {
   question: "📚",
   analysis: "📊",
+  agent: "🤖",
 };
 
-export function SlashCommandMenu({ query, onSelect }: SlashCommandMenuProps) {
-  const filtered = SLASH_COMMANDS.filter((c) =>
+export function SlashCommandMenu({ query, onSelect, commands }: SlashCommandMenuProps) {
+  const pool = commands ?? SLASH_COMMANDS;
+  const filtered = pool.filter((c) =>
     c.name.toLowerCase().includes(query.toLowerCase()),
   );
 

@@ -27,7 +27,6 @@ const MODE_CONFIG: Record<
     placeholder: string;
     focusBorder: string;
     sendBg: string;
-    tabActiveClass: string;
   }
 > = {
   question: {
@@ -35,29 +34,20 @@ const MODE_CONFIG: Record<
     placeholder: "Ask a fitness question…",
     focusBorder: "focus-within:border-indigo-400",
     sendBg: "bg-indigo-600 hover:bg-indigo-500",
-    tabActiveClass: "border-b-2 border-indigo-500 text-indigo-600 bg-indigo-50",
   },
   analysis: {
     badge: "📊 /analysis",
     placeholder: "What do you want to know about your training?",
     focusBorder: "focus-within:border-emerald-400",
     sendBg: "bg-emerald-600 hover:bg-emerald-500",
-    tabActiveClass: "border-b-2 border-emerald-500 text-emerald-600 bg-emerald-50",
   },
   agent: {
-    badge: "🤖 @AgentAssist",
+    badge: "🤖 /agent",
     placeholder: 'Ask about your athletes… e.g. "Is Alex ready to increase weight?"',
     focusBorder: "focus-within:border-violet-400",
     sendBg: "bg-violet-600 hover:bg-violet-500",
-    tabActiveClass: "border-b-2 border-violet-500 text-violet-600 bg-violet-50",
   },
 };
-
-const COACH_TABS: { mode: CommandMode; emoji: string; label: string }[] = [
-  { mode: "question", emoji: "📚", label: "Knowledge" },
-  { mode: "analysis", emoji: "📊", label: "Analyze" },
-  { mode: "agent",   emoji: "🤖", label: "Agent Assist" },
-];
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -153,11 +143,6 @@ export function ChatInput({
     ref.current?.focus();
   }
 
-  function selectTab(mode: CommandMode) {
-    onModeChange(mode);
-    ref.current?.focus();
-  }
-
   function submit() {
     const raw = value.trim();
     if (!raw || disabled) return;
@@ -182,52 +167,30 @@ export function ChatInput({
 
   return (
     <div className="relative">
-      {showSlashMenu && <SlashCommandMenu query={slashQuery} onSelect={handleCommandSelect} />}
+      {showSlashMenu && (
+        <SlashCommandMenu
+          query={slashQuery}
+          onSelect={handleCommandSelect}
+          commands={isCoach ? SLASH_COMMANDS : SLASH_COMMANDS.filter(c => c.mode !== "agent")}
+        />
+      )}
       {showAtMenu && <AtMentionMenu query={atQuery} onSelect={handleAtSelect} />}
 
       <div className={`flex flex-col border border-neutral-200 bg-white transition-colors overflow-hidden ${cfg.focusBorder}`}>
 
-        {/* ── Coach: tab bar ─────────────────────────────────────────────── */}
-        {isCoach ? (
-          <div className="flex border-b border-neutral-100">
-            {COACH_TABS.map((tab) => (
-              <button
-                key={tab.mode}
-                onClick={() => selectTab(tab.mode)}
-                disabled={disabled}
-                className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-xs font-medium transition-all border-b-2 ${
-                  activeMode === tab.mode
-                    ? cfg.tabActiveClass
-                    : "border-transparent text-neutral-500 hover:text-neutral-700 hover:bg-neutral-50"
-                } disabled:pointer-events-none`}
-              >
-                <span>{tab.emoji}</span>
-                <span>{tab.label}</span>
-              </button>
-            ))}
-          </div>
-        ) : (
-          /* ── Athlete: mode badge ───────────────────────────────────────── */
-          <div className="flex items-center gap-2 px-4 pt-2.5 pb-0">
-            <button
-              onClick={() => { setShowSlashMenu((v) => !v); setShowAtMenu(false); }}
-              className="flex items-center gap-1.5 border border-neutral-200 px-2 py-0.5 text-xs font-medium text-neutral-600 hover:bg-neutral-50 transition-colors"
-              title="Type / to change command"
-            >
-              {cfg.badge}
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" className="opacity-50">
-                <path d="M1 3l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" />
-              </svg>
-            </button>
-          </div>
-        )}
-
-        {/* ── Agent hint ─────────────────────────────────────────────────── */}
-        {isCoach && activeMode === "agent" && (
-          <p className="px-4 pt-2 text-[11px] text-violet-500/70 leading-snug">
-            Mention athlete names in your message — e.g. "Alex", "Binh", or "both athletes"
-          </p>
-        )}
+        {/* ── Mode badge (all users) ─────────────────────────────────────── */}
+        <div className="flex items-center gap-2 px-4 pt-2.5 pb-0">
+          <button
+            onClick={() => { setShowSlashMenu((v) => !v); setShowAtMenu(false); }}
+            className="flex items-center gap-1.5 border border-neutral-200 px-2 py-0.5 text-xs font-medium text-neutral-600 hover:bg-neutral-50 transition-colors"
+            title="Type / to change mode"
+          >
+            {cfg.badge}
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" className="opacity-50">
+              <path d="M1 3l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
 
         {/* ── Textarea + send ────────────────────────────────────────────── */}
         <div className="flex items-end gap-2 px-4 py-3">

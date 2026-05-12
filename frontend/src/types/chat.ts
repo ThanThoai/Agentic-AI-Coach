@@ -133,6 +133,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Analyse my workout history with AI",
     placeholder: "What do you want to know about your training?",
   },
+  {
+    name: "/agent",
+    mode: "agent",
+    description: "Coach Assist — ask about your athletes",
+    placeholder: 'Ask about your athletes… e.g. "Is Alex ready to increase weight?"',
+  },
 ];
 
 // ── Message types ─────────────────────────────────────────────────────────────
