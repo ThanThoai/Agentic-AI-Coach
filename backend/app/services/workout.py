@@ -96,7 +96,7 @@ async def classify_question(
         focus = data.get("focus") or None
         return q_type, focus
     except Exception:
-        log.warning("workout.classifier.failed", question=question[:50])
+        log.warning("workout.classifier.failed")
         return "GENERAL", None
 
 

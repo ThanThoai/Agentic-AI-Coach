@@ -175,7 +175,6 @@ async def dispatch_tool(tool_call: ToolCall) -> str:
             "agent.tool.error",
             tool=tool_call.name,
             err_type=type(exc).__name__,
-            err=str(exc),
         )
         return f"ERROR: {type(exc).__name__}: {exc}"
 

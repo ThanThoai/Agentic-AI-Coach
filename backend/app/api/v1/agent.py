@@ -43,7 +43,9 @@ async def ask_agent(
     try:
         result = await service.run(payload.question, requester_id)
     except AgentError as exc:
-        log.error("agent.failed", user_id=str(requester_id), err=str(exc))
+        log.exception(
+            "agent.failed", user_id=str(requester_id), err_type=type(exc).__name__
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Agent could not produce an answer. Please try again.",
