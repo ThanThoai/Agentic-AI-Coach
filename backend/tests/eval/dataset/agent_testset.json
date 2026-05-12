@@ -1,0 +1,61 @@
+[
+  {
+    "id": "agent-01",
+    "category": "agent",
+    "question": "Based on Binh's recent bench press history, is he ready to increase weight? What does proper progressive overload look like?",
+    "expected_tools": ["analyze_history", "rag_search"],
+    "expected_answer": "Binh's bench press data shows his recent progression. Based on progressive overload principles, a weight increase is appropriate when the lifter can complete all sets at the current weight with good form. Given his trajectory, a weight increase next session is supported.",
+    "pass_criteria": {
+      "tools_used_match": true,
+      "data_values_referenced": true,
+      "iterations_max": 3
+    }
+  },
+  {
+    "id": "agent-02",
+    "category": "agent",
+    "question": "What is RPE and how should I use it when programming for my athletes?",
+    "expected_tools": ["rag_search"],
+    "expected_answer": "RPE (Rate of Perceived Exertion) is a 1-10 subjective intensity scale. For coach programming: prescribe target RPEs per set rather than fixed percentages, allowing athletes to auto-regulate on days when fatigue or recovery varies.",
+    "pass_criteria": {
+      "tools_used_match": true,
+      "iterations_max": 2
+    }
+  },
+  {
+    "id": "agent-03",
+    "category": "agent",
+    "question": "How has Alex's squat progressed this month?",
+    "expected_tools": ["analyze_history"],
+    "expected_answer": "Alex's squat this month shows a trend in his working weights. His volume per session can be tracked across the recorded sessions.",
+    "pass_criteria": {
+      "tools_used_match": true,
+      "data_values_referenced": true,
+      "iterations_max": 2
+    }
+  },
+  {
+    "id": "agent-04",
+    "category": "agent",
+    "question": "Compare Alex and Binh's push/pull volume — who needs more pulling work?",
+    "expected_tools": ["analyze_history", "analyze_history"],
+    "expected_answer": "Alex and Binh have different push/pull volume distributions. One of them shows a more pronounced push-dominant pattern and should prioritise adding rowing and rear-delt work.",
+    "pass_criteria": {
+      "tools_used_match": true,
+      "data_values_referenced": true,
+      "iterations_max": 3
+    }
+  },
+  {
+    "id": "agent-05",
+    "category": "agent",
+    "question": "Based on Alex's training over the past 3 months, should I plan a periodisation block for him?",
+    "expected_tools": ["analyze_history", "rag_search"],
+    "expected_answer": "Alex's data for the last 3 months shows whatever training history is available. Based on periodisation principles from the knowledge base, a periodisation block approach can be recommended.",
+    "pass_criteria": {
+      "tools_used_match": true,
+      "answer_not_empty": true,
+      "iterations_max": 3
+    }
+  }
+]

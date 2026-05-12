@@ -67,6 +67,35 @@ class OpenAIProvider(BaseLLMProvider):
             ),
         )
 
+    async def complete_json(
+        self,
+        messages: list[LLMMessage],
+        *,
+        model: str | None = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.7,
+        system: str | None = None,
+    ) -> LLMResponse:
+        resp = await self._client.chat.completions.create(  # type: ignore[call-overload]
+            model=model or self._default_model,
+            messages=self._to_oai_messages(messages, system),
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format={"type": "json_object"},
+        )
+        choice = resp.choices[0]
+        usage = resp.usage
+        return LLMResponse(
+            content=choice.message.content or "",
+            model=resp.model,
+            provider=self.provider_name,
+            usage=TokenUsage(
+                prompt_tokens=usage.prompt_tokens if usage else 0,
+                completion_tokens=usage.completion_tokens if usage else 0,
+                total_tokens=usage.total_tokens if usage else 0,
+            ),
+        )
+
     async def stream(
         self,
         messages: list[LLMMessage],

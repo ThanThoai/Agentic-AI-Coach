@@ -1,0 +1,123 @@
+[
+  {
+    "id": "rag-01",
+    "category": "rag",
+    "query_type_expected": "SIMPLE",
+    "question": "What is RPE in strength training?",
+    "expected_answer": "RPE (Rate of Perceived Exertion) is a subjective scale from 1 to 10 used to rate how hard a set feels. An RPE of 10 means maximum effort with no reps left; RPE 8 means 2 reps left in reserve. Coaches use RPE to auto-regulate training intensity across varying energy levels.",
+    "pass_criteria": {
+      "citation_present": true,
+      "in_scope": true,
+      "guardrail_blocked": false
+    }
+  },
+  {
+    "id": "rag-02",
+    "category": "rag",
+    "query_type_expected": "COMPLEX",
+    "question": "What is progressive overload and how does periodization help implement it over a training cycle?",
+    "expected_answer": "Progressive overload is the principle of gradually increasing training stimulus over time — via added weight, reps, sets, or reduced rest — to force continued adaptation. Periodization structures this progression into phases (e.g. mesocycles of accumulation → intensification → deload) so overload is applied systematically rather than haphazardly, reducing injury risk and optimising peak performance.",
+    "pass_criteria": {
+      "citation_present": true,
+      "in_scope": true,
+      "guardrail_blocked": false
+    }
+  },
+  {
+    "id": "rag-03",
+    "category": "rag",
+    "query_type_expected": "COMPARISON",
+    "question": "What are the key differences between Push/Pull/Legs and Upper/Lower training splits?",
+    "expected_answer": "PPL trains each muscle group with ~2x weekly frequency across 6 sessions — push (chest/shoulders/triceps), pull (back/biceps), legs — giving high volume per session. Upper/Lower runs 4 sessions per week with each session hitting all upper or all lower muscles, offering slightly lower per-session volume but more recovery between sessions and better adherence for intermediate lifters who can't train 6 days.",
+    "pass_criteria": {
+      "citation_present": true,
+      "in_scope": true,
+      "guardrail_blocked": false
+    }
+  },
+  {
+    "id": "rag-04",
+    "category": "rag",
+    "query_type_expected": "SIMPLE",
+    "question": "What are the most common mistakes when performing the bench press?",
+    "expected_answer": "Common bench press mistakes include: flaring elbows past 90 degrees, bouncing the bar off the chest, losing leg drive, gripping too wide or too narrow, and failing to retract the shoulder blades. Each error reduces power transfer or increases shoulder/elbow injury risk.",
+    "pass_criteria": {
+      "citation_present": true,
+      "in_scope": true,
+      "guardrail_blocked": false
+    }
+  },
+  {
+    "id": "rag-05",
+    "category": "rag",
+    "query_type_expected": "SIMPLE",
+    "question": "As a complete beginner, what warm-up should I do before lifting weights?",
+    "expected_answer": "Beginners should start with 5-10 minutes of light cardiovascular activity to raise core temperature, followed by dynamic stretches targeting the joints they'll train. Then perform 1-2 warm-up sets of each main exercise at 40-60% of working weight before adding load. Avoid prolonged static stretching before lifting.",
+    "pass_criteria": {
+      "citation_present": true,
+      "in_scope": true,
+      "guardrail_blocked": false
+    }
+  },
+  {
+    "id": "rag-06",
+    "category": "rag",
+    "query_type_expected": "SIMPLE",
+    "question": "What is a one-rep max and how do I calculate it without actually maxing out?",
+    "expected_answer": "A one-rep max (1RM) is the maximum weight you can lift for a single repetition with good form. You can estimate it without a true max attempt using prediction formulas such as Epley (weight x (1 + reps/30)) or Brzycki (weight / (1.0278 - 0.0278 x reps)), typically using a set performed to near-failure at 3-8 reps. These estimates carry +-5% accuracy.",
+    "pass_criteria": {
+      "citation_present": true,
+      "in_scope": true,
+      "guardrail_blocked": false
+    }
+  },
+  {
+    "id": "rag-07",
+    "category": "rag",
+    "query_type_expected": "SIMPLE",
+    "question": "When should I take a deload week and what does it look like?",
+    "expected_answer": "A deload week is a planned reduction in training volume and/or intensity — typically 40-60% of normal load — taken every 4-8 weeks or whenever accumulated fatigue impairs performance. A typical deload keeps the same exercises but reduces sets by 50% and drops working weight by 20-40%. It allows the CNS and muscles to recover before the next training block.",
+    "pass_criteria": {
+      "citation_present": true,
+      "in_scope": true,
+      "guardrail_blocked": false
+    }
+  },
+  {
+    "id": "rag-08",
+    "category": "rag",
+    "query_type_expected": "COMPARISON",
+    "question": "Compare full-body, Push/Pull/Legs, and Upper/Lower training splits — which suits different experience levels?",
+    "expected_answer": "Full-body splits (3x/week) suit beginners: low per-session volume, high practice frequency. Upper/Lower (4x/week) suits intermediates: more volume per muscle group, better specialisation. PPL (6x/week) suits advanced lifters: highest weekly volume per muscle group, most flexibility for specialisation, but demanding recovery requirements.",
+    "pass_criteria": {
+      "citation_present": true,
+      "in_scope": true,
+      "guardrail_blocked": false
+    }
+  },
+  {
+    "id": "rag-09",
+    "category": "rag",
+    "query_type_expected": "COMPLEX",
+    "question": "How long does muscle recovery take after a hard session, and how does this affect how often I should train each muscle group?",
+    "expected_answer": "Muscle protein synthesis (MPS) peaks 24-36 hours post-session and returns to baseline within 48-72 hours for most trained individuals, though connective tissue takes longer. This underpins the 2x per week per muscle group recommendation for intermediate lifters. Beginners recover faster; advanced lifters may need 72+ hours for heavy compound movements.",
+    "pass_criteria": {
+      "citation_present": true,
+      "in_scope": true,
+      "guardrail_blocked": false
+    }
+  },
+  {
+    "id": "rag-10",
+    "category": "rag",
+    "query_type_expected": "SIMPLE",
+    "question": "What is blood flow restriction training and how does it compare to normal strength training?",
+    "expected_answer": "I couldn't find relevant information in the fitness knowledge base for that question.",
+    "pass_criteria": {
+      "citation_present": false,
+      "in_scope": false,
+      "guardrail_blocked": false,
+      "out_of_scope_message_present": true
+    }
+  }
+]

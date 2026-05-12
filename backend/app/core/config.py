@@ -109,11 +109,11 @@ class Settings(BaseSettings):
     openrouter_generation_model: str = "anthropic/claude-sonnet-4-5"
 
     # Agent (Feature 3) — coach assist agent
-    agent_provider: LLMProvider | None = None   # None → default_llm_provider
-    agent_model: str | None = None              # None → provider's default_model
+    agent_provider: LLMProvider | None = None  # None → default_llm_provider
+    agent_model: str | None = None  # None → provider's default_model
     agent_max_iterations: int = 4
-    agent_llm_timeout: float = 60.0    # seconds per complete_with_tools() call
-    agent_tool_timeout: float = 45.0   # seconds per individual tool execution
+    agent_llm_timeout: float = 60.0  # seconds per complete_with_tools() call
+    agent_tool_timeout: float = 45.0  # seconds per individual tool execution
 
     # Workout analysis — per-step model routing
     # provider: None → falls back to default_llm_provider
@@ -125,6 +125,23 @@ class Settings(BaseSettings):
     # Per-step model defaults when using OpenRouter (overrides workout_*_model when set)
     openrouter_workout_classifier_model: str = "anthropic/claude-haiku-4-5"
     openrouter_workout_generation_model: str = "anthropic/claude-sonnet-4-5"
+
+    # Evaluation pipeline (Feature 4) — native provider model names
+    eval_faithfulness_model_anthropic: str = "claude-sonnet-4-6"
+    eval_faithfulness_model_openai: str = "gpt-4o"
+    eval_faithfulness_model_gemini: str = "gemini-2.5-pro"
+    eval_helpfulness_model_anthropic: str = "claude-haiku-4-5-20251001"
+    eval_helpfulness_model_openai: str = "gpt-4o-mini"
+    eval_helpfulness_model_gemini: str = "gemini-2.0-flash"
+    # OpenRouter model IDs for eval judges (used when DEFAULT_LLM_PROVIDER=openrouter)
+    openrouter_eval_faithfulness_anthropic: str = "anthropic/claude-sonnet-4-5"
+    openrouter_eval_faithfulness_openai: str = "openai/gpt-4o"
+    openrouter_eval_faithfulness_gemini: str = "google/gemini-3.1-pro-preview"
+    openrouter_eval_helpfulness_anthropic: str = "anthropic/claude-haiku-4-5"
+    openrouter_eval_helpfulness_openai: str = "openai/gpt-4o-mini"
+    openrouter_eval_helpfulness_gemini: str = "google/gemini-3.1-pro-preview"
+    eval_dispute_threshold: float = 1.5
+    eval_pass_threshold: float = 0.7
 
     @field_validator("jwt_secret", mode="before")
     @classmethod

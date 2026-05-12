@@ -1,0 +1,104 @@
+[
+  {
+    "id": "wo-01",
+    "category": "workout",
+    "athlete": "alex",
+    "question_type_expected": "TREND",
+    "question": "How has Alex's bench press progressed over the last 4 weeks?",
+    "expected_answer": "Alex's bench press has shown a progressive upward trend over the last 4 weeks, with working weight increasing from approximately 60 kg to 70 kg. Volume per session has remained consistent, suggesting the load increase is being handled well. No deload was detected in this period.",
+    "pass_criteria": {
+      "data_values_referenced": true,
+      "insufficient_data": false
+    }
+  },
+  {
+    "id": "wo-02",
+    "category": "workout",
+    "athlete": "binh",
+    "question_type_expected": "BALANCE",
+    "question": "Does Binh have a push/pull muscle imbalance in his training?",
+    "expected_answer": "Binh shows a push-dominant imbalance with a chest-to-back ratio above 1.0, indicating more volume dedicated to pushing movements than pulling. This is a common pattern that can contribute to shoulder impingement over time. Increasing rowing volume would help correct the ratio.",
+    "pass_criteria": {
+      "data_values_referenced": true,
+      "insufficient_data": false
+    }
+  },
+  {
+    "id": "wo-03",
+    "category": "workout",
+    "athlete": "alex",
+    "question_type_expected": "NEGLECT",
+    "question": "Which muscle groups has Alex not trained in the last 2 weeks?",
+    "expected_answer": "Alex has neglected certain muscle groups in the last 2 weeks, with no recorded sessions targeting those groups. His training appears primarily focused on upper body pushing and pulling movements.",
+    "date_from_offset_days": -14,
+    "date_to_offset_days": 0,
+    "pass_criteria": {
+      "data_values_referenced": true,
+      "insufficient_data": false
+    }
+  },
+  {
+    "id": "wo-04",
+    "category": "workout",
+    "athlete": "binh",
+    "question_type_expected": "PLAN",
+    "question": "Based on Binh's squat history, should I increase his working weight next session?",
+    "expected_answer": "Yes, Binh's squat data supports a modest weight increase. He has consistently completed his prescribed sets at his current working weight over the last several sessions without signs of a plateau. A 2.5-5 kg increase follows the standard progressive overload guideline for intermediate lifters.",
+    "pass_criteria": {
+      "data_values_referenced": true,
+      "insufficient_data": false
+    }
+  },
+  {
+    "id": "wo-05",
+    "category": "workout",
+    "athlete": "binh",
+    "question_type_expected": "GENERAL",
+    "question": "Give me an overview of Binh's training in the last month.",
+    "expected_answer": "In the last month, Binh has completed multiple sessions covering various muscle groups. His training covers chest, back, shoulders, arms, and legs. His most trained muscle group by volume can be identified from the data summary.",
+    "pass_criteria": {
+      "data_values_referenced": true,
+      "insufficient_data": false
+    }
+  },
+  {
+    "id": "wo-06",
+    "category": "workout",
+    "athlete": "binh",
+    "question_type_expected": "TREND",
+    "question": "Has Binh had a deload week recently, and does he need one now?",
+    "expected_answer": "Binh's training data shows the deload detection results for the reviewed period. Based on his current volume trend and session frequency, a recommendation on deload timing can be made.",
+    "pass_criteria": {
+      "data_values_referenced": true,
+      "insufficient_data": false
+    }
+  },
+  {
+    "id": "wo-07",
+    "category": "workout",
+    "athlete": "alex",
+    "question_type_expected": "GENERAL",
+    "question": "What has Alex been training over the past 2 weeks?",
+    "date_from_offset_days": -14,
+    "date_to_offset_days": 0,
+    "expected_answer": "In the last 2 weeks, Alex has completed a number of sessions. The exercises recorded include his standard training routine. His most recent session was within the date window.",
+    "pass_criteria": {
+      "data_values_referenced": true,
+      "insufficient_data": false
+    }
+  },
+  {
+    "id": "wo-08",
+    "category": "workout",
+    "athlete": "alex",
+    "question_type_expected": "GENERAL",
+    "question": "Analyse Alex's training over the past 100 days.",
+    "date_from_offset_days": -100,
+    "date_to_offset_days": -90,
+    "expected_answer": "There is insufficient workout data for Alex in the requested period. Please log at least 2 sessions before requesting an analysis.",
+    "pass_criteria": {
+      "insufficient_data": true,
+      "no_fabricated_analysis": true
+    }
+  }
+]
