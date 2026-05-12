@@ -9,16 +9,16 @@ import { fetchDemoToken } from "@/lib/api/auth";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
 import { UserSelector } from "./UserSelector";
+import { TraceSidebar } from "./TraceSidebar";
 
 const RAG_PIPELINE_LABELS: { label: string; delayMs: number }[] = [
-  { label: "Checking guardrails (Layer 1)", delayMs: 0 },
-  { label: "Classifying intent (Layer 2)", delayMs: 300 },
+  { label: "Checking guardrails (L1)", delayMs: 0 },
+  { label: "Classifying intent (L2)", delayMs: 300 },
   { label: "Processing query", delayMs: 700 },
-  { label: "Running hybrid search", delayMs: 1200 },
+  { label: "Hybrid search", delayMs: 1200 },
   { label: "Assembling context", delayMs: 1800 },
   { label: "Generating answer", delayMs: 2300 },
 ];
-
 const ANALYSIS_PIPELINE_LABELS: { label: string; delayMs: number }[] = [
   { label: "Fetching workout history", delayMs: 0 },
   { label: "Computing analytics", delayMs: 400 },
@@ -26,12 +26,11 @@ const ANALYSIS_PIPELINE_LABELS: { label: string; delayMs: number }[] = [
   { label: "Building context", delayMs: 1400 },
   { label: "Generating answer", delayMs: 1900 },
 ];
-
 const AGENT_PIPELINE_LABELS: { label: string; delayMs: number }[] = [
-  { label: "Routing to Coach Agent", delayMs: 0 },
-  { label: "Selecting tools to call", delayMs: 600 },
+  { label: "Routing to agent", delayMs: 0 },
+  { label: "Selecting tools", delayMs: 600 },
   { label: "Running tools in parallel", delayMs: 1400 },
-  { label: "Synthesising coaching advice", delayMs: 2400 },
+  { label: "Synthesising answer", delayMs: 2400 },
 ];
 
 const ALL_DEMO_KEYS = ["alex", "binh", "coach"] as const;
@@ -46,7 +45,7 @@ function finaliseRAGSteps(steps: PipelineStep[], response: RAGResponse): Pipelin
     switch (i) {
       case 0: {
         const l1 = trace?.guardrail_l1;
-        if (l1?.status === "blocked") return { ...s, status: "done", detail: `blocked: ${l1.block_reason}` };
+        if (l1?.status === "blocked") return { ...s, status: "done", detail: `blocked` };
         return { ...s, status: "done", detail: "passed" };
       }
       case 1: {
@@ -58,18 +57,18 @@ function finaliseRAGSteps(steps: PipelineStep[], response: RAGResponse): Pipelin
         const qp = trace?.query_processor;
         if (!qp) return { ...s, status: "done" };
         const n = qp.sub_questions.length;
-        return { ...s, status: "done", detail: `${qp.query_type} · ${n} sub-question${n !== 1 ? "s" : ""}` };
+        return { ...s, status: "done", detail: `${qp.query_type} · ${n} sub-q` };
       }
       case 3: {
         const r = trace?.retrieval;
         if (!r) return { ...s, status: "done" };
-        return { ...s, status: "done", detail: `${r.total_merged} chunks merged` };
+        return { ...s, status: "done", detail: `${r.total_merged} chunks` };
       }
       case 4: {
         const ctx = trace?.context;
         if (!ctx) return { ...s, status: "done" };
-        const conflictNote = ctx.conflict_count > 0 ? ` · ${ctx.conflict_count} conflict${ctx.conflict_count !== 1 ? "s" : ""}` : "";
-        return { ...s, status: "done", detail: `${ctx.strategy} · ${ctx.chunks_used} chunks${conflictNote}` };
+        const c = ctx.conflict_count > 0 ? ` · ${ctx.conflict_count} conflict${ctx.conflict_count !== 1 ? "s" : ""}` : "";
+        return { ...s, status: "done", detail: `${ctx.strategy}${c}` };
       }
       case 5:
         if (!response.in_scope) return { ...s, status: "skipped" };
@@ -88,12 +87,16 @@ export function ChatWindow() {
   const [activeUser, setActiveUser] = useState<DemoUser | null>(null);
   const [demoUsers, setDemoUsers] = useState<DemoUser[]>([]);
   const [userLoading, setUserLoading] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const isCoach = activeUser?.role === "coach";
+  const hasMessages = messages.length > 0;
+  const isTyping = input.length > 0;
 
-  // Load all demo tokens on mount
+  const lastAssistantMsg = [...messages].reverse().find(m => m.role === "assistant") ?? null;
+
   useEffect(() => {
     async function loadUsers() {
       setUserLoading(true);
@@ -101,11 +104,8 @@ export function ChatWindow() {
         const users = await Promise.all(ALL_DEMO_KEYS.map(fetchDemoToken));
         setDemoUsers(users);
         setActiveUser(users[0]);
-      } catch {
-        // Continue without auth
-      } finally {
-        setUserLoading(false);
-      }
+      } catch { /* silent */ }
+      finally { setUserLoading(false); }
     }
     void loadUsers();
   }, []);
@@ -115,44 +115,36 @@ export function ChatWindow() {
   }, [messages]);
 
   const updateMessage = useCallback((id: string, patch: Partial<Message>) => {
-    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+    setMessages(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m));
   }, []);
 
   function animatePipeline(assistantId: string, labels: { label: string; delayMs: number }[]) {
     timersRef.current.forEach(clearTimeout);
     timersRef.current = labels.map(({ delayMs }, i) =>
       setTimeout(() => {
-        setMessages((prev) =>
-          prev.map((m) => {
-            if (m.id !== assistantId) return m;
-            const steps = [...(m.pipelineSteps ?? [])];
-            steps[i] = { ...steps[i], status: "done" };
-            return { ...m, pipelineSteps: steps };
-          }),
-        );
+        setMessages(prev => prev.map(m => {
+          if (m.id !== assistantId) return m;
+          const steps = [...(m.pipelineSteps ?? [])];
+          steps[i] = { ...steps[i], status: "done" };
+          return { ...m, pipelineSteps: steps };
+        }));
       }, delayMs),
     );
   }
 
   async function send(rawText: string, mode: CommandMode) {
     if (loading) return;
-    // Strip @AgentAssist mention from text (ChatInput already does this for typed messages,
-    // but example buttons call send() directly with the raw string)
     const text = mode === "agent" ? rawText.replace(/^@AgentAssist\s*/i, "").trim() : rawText;
-    // Snapshot state at call time to guard against mid-await changes
     const user = activeUser;
     setLoading(true);
 
-    // Determine data owner label (agent resolves athlete from message text server-side)
-    const dataOwnerForMode =
-      mode === "analysis" && user
-        ? { key: user.key, name: user.name }
-        : undefined;
+    const dataOwnerForMode = mode === "analysis" && user
+      ? { key: user.key, name: user.name }
+      : undefined;
 
-    const labels =
-      mode === "agent" ? AGENT_PIPELINE_LABELS :
-      mode === "analysis" ? ANALYSIS_PIPELINE_LABELS :
-      RAG_PIPELINE_LABELS;
+    const labels = mode === "agent" ? AGENT_PIPELINE_LABELS
+      : mode === "analysis" ? ANALYSIS_PIPELINE_LABELS
+      : RAG_PIPELINE_LABELS;
 
     const userMsg: Message = { id: crypto.randomUUID(), role: "user", content: text, commandMode: mode };
     const assistantId = crypto.randomUUID();
@@ -166,7 +158,7 @@ export function ChatWindow() {
       pipelineSteps: initialSteps(labels),
     };
 
-    setMessages((prev) => [...prev, userMsg, assistantMsg]);
+    setMessages(prev => [...prev, userMsg, assistantMsg]);
     animatePipeline(assistantId, labels);
 
     try {
@@ -177,7 +169,7 @@ export function ChatWindow() {
         updateMessage(assistantId, {
           content: response.answer,
           agentResponse: response,
-          pipelineSteps: initialSteps(AGENT_PIPELINE_LABELS).map((s) => ({ ...s, status: "done" })),
+          pipelineSteps: initialSteps(AGENT_PIPELINE_LABELS).map(s => ({ ...s, status: "done" })),
           isLoading: false,
         });
       } else if (mode === "analysis") {
@@ -187,14 +179,14 @@ export function ChatWindow() {
         updateMessage(assistantId, {
           content: response.answer,
           workoutResponse: response,
-          pipelineSteps: initialSteps(labels).map((s) => ({ ...s, status: "done" })),
+          pipelineSteps: initialSteps(labels).map(s => ({ ...s, status: "done" })),
           isLoading: false,
         });
       } else {
         const response = await queryRAGStream(text, (token) => {
-          setMessages((prev) =>
-            prev.map((m) => m.id !== assistantId ? m : { ...m, content: m.content + token }),
-          );
+          setMessages(prev => prev.map(m =>
+            m.id !== assistantId ? m : { ...m, content: m.content + token }
+          ));
         });
         timersRef.current.forEach(clearTimeout);
         updateMessage(assistantId, {
@@ -213,7 +205,7 @@ export function ChatWindow() {
       updateMessage(assistantId, {
         content: "",
         error: msg,
-        pipelineSteps: initialSteps(labels).map((s) => ({ ...s, status: "done" })),
+        pipelineSteps: initialSteps(labels).map(s => ({ ...s, status: "done" })),
         isLoading: false,
       });
     } finally {
@@ -223,25 +215,19 @@ export function ChatWindow() {
 
   function handleUserSelect(user: DemoUser) {
     setActiveUser(user);
-    // When switching to athlete, reset mode from agent if needed
-    if (user.role !== "coach" && activeMode === "agent") {
-      setActiveMode("question");
-    }
+    if (user.role !== "coach" && activeMode === "agent") setActiveMode("question");
   }
 
-  return (
-    <div className="flex h-screen flex-col bg-gray-950 text-gray-100">
-      {/* Header */}
-      <header className="border-b border-white/10 px-6 py-3">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold">
-              C
-            </div>
-            <div>
-              <h1 className="text-sm font-semibold">Coach Agent</h1>
-              <p className="text-xs text-gray-500">AI fitness coaching</p>
-            </div>
+  // ── Landing view (no messages yet) ──────────────────────────────────────────
+  if (!hasMessages) {
+    return (
+      <div className="flex h-screen flex-col bg-neutral-50">
+
+        {/* Minimal top bar */}
+        <header className="flex items-center justify-between px-6 py-3.5 shrink-0">
+          <div className="flex items-center gap-2">
+            <div className="flex h-7 w-7 items-center justify-center bg-indigo-600 text-xs font-bold text-white">C</div>
+            <span className="text-sm font-semibold text-neutral-800">Coach Agent</span>
           </div>
           {demoUsers.length > 0 && activeUser && (
             <UserSelector
@@ -251,123 +237,193 @@ export function ChatWindow() {
               loading={userLoading || loading}
             />
           )}
-        </div>
+        </header>
 
-        {/* Coach hint */}
-        {isCoach && (
-          <div className="mt-1.5 text-[10px] text-gray-600 text-right">
-            Mention <span className="text-purple-400 font-mono">@AgentAssist</span> and an athlete name (e.g. "Alex", "Binh") in your message
+        {/* Centered content */}
+        <div className="flex flex-1 flex-col items-center px-6 pb-16" style={{ paddingTop: "8vh" }}>
+
+          {/* Hero — collapses when typing starts */}
+          <div className={`w-full max-w-xl text-center overflow-hidden transition-all duration-300 ease-out ${
+            isTyping ? "max-h-0 opacity-0 mb-0" : "max-h-56 opacity-100 mb-10"
+          }`}>
+            <div className="flex h-16 w-16 items-center justify-center bg-indigo-600 text-2xl font-bold text-white mx-auto mb-5">
+              C
+            </div>
+            <h1 className="text-2xl font-semibold text-neutral-900">Coach Agent</h1>
+            <p className="mt-2 text-sm text-neutral-500 max-w-xs mx-auto leading-relaxed">
+              {isCoach
+                ? "AI-powered coaching — analyze athletes and get training insights."
+                : "Ask anything about training, nutrition, and programming."}
+            </p>
           </div>
-        )}
-      </header>
 
-      {/* Messages */}
-      <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-2xl space-y-6 px-4 py-6">
-          {messages.length === 0 && (
-            <EmptyState onExample={send} disabled={loading} activeMode={activeMode} isCoach={isCoach} />
-          )}
-          {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
-          ))}
-          <div ref={bottomRef} />
-        </div>
-      </main>
+          {/* Input box — expands (zoom ra) when typing */}
+          <div className={`w-full transition-all duration-300 ease-out ${
+            isTyping ? "max-w-3xl" : "max-w-xl"
+          }`}>
+            <ChatInput
+              value={input}
+              onChange={setInput}
+              onSend={send}
+              disabled={loading}
+              activeMode={activeMode}
+              onModeChange={setActiveMode}
+              isCoach={isCoach}
+            />
+          </div>
 
-      {/* Input */}
-      <footer className="border-t border-white/10 px-4 py-4">
-        <div className="mx-auto max-w-2xl">
-          <ChatInput
-            value={input}
-            onChange={setInput}
-            onSend={send}
-            disabled={loading}
-            activeMode={activeMode}
-            onModeChange={setActiveMode}
-            isCoach={isCoach}
-          />
-          <p className="mt-2 text-center text-xs text-gray-600">
-            Enter to send · Shift+Enter for new line
-            {!isCoach && " · / to switch mode"}
+          {/* Example prompts — collapse when typing */}
+          <div className={`w-full max-w-xl overflow-hidden transition-all duration-300 ease-out ${
+            isTyping ? "max-h-0 opacity-0 mt-0" : "max-h-72 opacity-100 mt-6"
+          }`}>
+            <LandingExamples
+              onExample={send}
+              disabled={loading}
+              activeMode={activeMode}
+              isCoach={isCoach}
+            />
+          </div>
+
+          <p className={`mt-4 text-center text-xs text-neutral-300 transition-opacity duration-300 ${
+            isTyping ? "opacity-0" : "opacity-100"
+          }`}>
+            Enter to send · Shift+Enter for new line{!isCoach && " · / to switch mode"}
           </p>
         </div>
-      </footer>
+      </div>
+    );
+  }
+
+  // ── Chat view (has messages) ─────────────────────────────────────────────────
+  return (
+    <div className="flex h-screen flex-col bg-neutral-50">
+
+      {/* Full header */}
+      <header className="flex items-center justify-between border-b border-neutral-200 bg-white px-5 py-3 shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="flex h-8 w-8 items-center justify-center bg-indigo-600 text-sm font-bold text-white">
+            C
+          </div>
+          <div>
+            <h1 className="text-sm font-semibold text-neutral-900">Coach Agent</h1>
+            <p className="text-xs text-neutral-400">AI fitness coaching</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          {demoUsers.length > 0 && activeUser && (
+            <UserSelector
+              users={demoUsers}
+              activeKey={activeUser.key}
+              onSelect={handleUserSelect}
+              loading={userLoading || loading}
+            />
+          )}
+          <button
+            onClick={() => setSidebarOpen(v => !v)}
+            className={`flex items-center gap-1.5 border px-3 py-1.5 text-xs font-medium transition-colors ${
+              sidebarOpen
+                ? "border-indigo-200 bg-indigo-50 text-indigo-700"
+                : "border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50"
+            }`}
+            title="Toggle trace sidebar"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="18" height="18" rx="0" />
+              <path d="M15 3v18" />
+            </svg>
+            Trace
+          </button>
+        </div>
+      </header>
+
+      {/* Body: chat + sidebar */}
+      <div className="flex flex-1 overflow-hidden">
+
+        {/* Chat column */}
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <main className="flex-1 overflow-y-auto">
+            <div className="mx-auto max-w-3xl space-y-6 px-6 py-8">
+              {messages.map(msg => (
+                <MessageBubble key={msg.id} message={msg} />
+              ))}
+              <div ref={bottomRef} />
+            </div>
+          </main>
+
+          {/* Input footer */}
+          <footer className="border-t border-neutral-200 bg-white px-6 py-4 shrink-0">
+            <div className="mx-auto max-w-3xl">
+              <ChatInput
+                value={input}
+                onChange={setInput}
+                onSend={send}
+                disabled={loading}
+                activeMode={activeMode}
+                onModeChange={setActiveMode}
+                isCoach={isCoach}
+              />
+              <p className="mt-2 text-center text-xs text-neutral-300">
+                Enter to send · Shift+Enter for new line{!isCoach && " · / to switch mode"}
+              </p>
+            </div>
+          </footer>
+        </div>
+
+        {/* Trace sidebar */}
+        {sidebarOpen && (
+          <aside className="flex w-72 shrink-0 flex-col border-l border-neutral-200 bg-white overflow-hidden">
+            <TraceSidebar message={lastAssistantMsg} onClose={() => setSidebarOpen(false)} />
+          </aside>
+        )}
+      </div>
     </div>
   );
 }
 
-// ── Empty state ───────────────────────────────────────────────────────────────
+// ── Landing examples ──────────────────────────────────────────────────────────
 
 const RAG_EXAMPLES = [
   "How many sets per week do I need for chest hypertrophy?",
   "Is PPL or Upper/Lower better for an intermediate lifter?",
-  "How should I structure my PPL split and what intensity for hypertrophy?",
+  "How should I structure my PPL split for hypertrophy?",
 ];
-
 const ANALYSIS_EXAMPLES = [
   "How has my training volume changed over the past few months?",
   "Which muscle groups am I neglecting in my training?",
   "Have I had any deload weeks recently?",
 ];
-
 const AGENT_EXAMPLES = [
   "Is Alex ready to increase bench press weight?",
   "Compare Alex and Binh's push/pull volume — who needs more pulling work?",
   "Summarise both athletes' progress and suggest next steps.",
 ];
 
-function EmptyState({
-  onExample,
-  disabled,
-  activeMode,
-  isCoach,
+function LandingExamples({
+  onExample, disabled, activeMode, isCoach,
 }: {
   onExample: (q: string, mode: CommandMode) => void;
   disabled: boolean;
   activeMode: CommandMode;
   isCoach: boolean;
 }) {
-  const isAgent = activeMode === "agent" || (isCoach && activeMode === "question");
-  const isAnalysis = activeMode === "analysis";
-
-  const title = isCoach
-    ? "Coach Dashboard"
-    : isAnalysis
-      ? "Workout Analysis"
-      : "Fitness Knowledge Base";
-
-  const subtitle = isCoach
-    ? "Pick a mode from the tab bar — Knowledge, Analyze, or Agent Assist."
-    : isAnalysis
-      ? "Ask about your training history and progress."
-      : "Ask about training, nutrition, and programming.";
-
-  const emoji = isCoach ? "🎯" : isAnalysis ? "📊" : "🏋️";
-
-  const examples = isCoach ? AGENT_EXAMPLES : isAnalysis ? ANALYSIS_EXAMPLES : RAG_EXAMPLES;
-  const exampleMode: CommandMode = isCoach ? "agent" : activeMode;
+  const effectiveMode: CommandMode = isCoach ? "agent" : activeMode;
+  const examples = isCoach ? AGENT_EXAMPLES : activeMode === "analysis" ? ANALYSIS_EXAMPLES : RAG_EXAMPLES;
 
   return (
-    <div className="flex flex-col items-center gap-6 py-12 text-center">
-      <div className={`flex h-14 w-14 items-center justify-center rounded-2xl text-3xl ${isCoach ? "bg-purple-600/20" : isAnalysis ? "bg-emerald-600/20" : "bg-indigo-600/20"}`}>
-        {emoji}
-      </div>
-      <div>
-        <h2 className="text-lg font-semibold text-gray-200">{title}</h2>
-        <p className="mt-1 text-sm text-gray-500 max-w-sm">{subtitle}</p>
-      </div>
-      <div className="w-full space-y-2">
-        {examples.map((q) => (
-          <button
-            key={q}
-            onClick={() => onExample(q, exampleMode)}
-            disabled={disabled}
-            className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-left text-sm text-gray-300 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
-          >
-            {q}
-          </button>
-        ))}
-      </div>
+    <div className="space-y-2">
+      <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-300 text-center mb-3">
+        Try asking
+      </p>
+      {examples.map(q => (
+        <button
+          key={q}
+          onClick={() => onExample(q, effectiveMode)}
+          disabled={disabled}
+          className="w-full border border-neutral-200 bg-white px-4 py-3 text-left text-sm text-neutral-600 transition-colors hover:bg-neutral-50 hover:text-neutral-800 disabled:opacity-50"
+        >
+          {q}
+        </button>
+      ))}
     </div>
   );
 }
