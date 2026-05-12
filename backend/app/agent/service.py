@@ -12,7 +12,7 @@ from app.core.config import settings as _settings
 from app.llm.base import AgentLLMResponse, ContentBlock, TokenUsage, ToolCall
 from app.llm.factory import get_step_provider
 
-from .prompts import COACH_AGENT_SYSTEM
+from app.prompts.agent import COACH_AGENT_SYSTEM
 from .tool_schemas import TOOL_SCHEMAS
 from .tools import execute_tools
 
