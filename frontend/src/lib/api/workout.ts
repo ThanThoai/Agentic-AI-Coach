@@ -47,6 +47,8 @@ interface WorkoutStreamDone {
   type: "done";
   answer: string;
   data_summary: WorkoutAnalysisResponse["data_summary"];
+  question_type?: string;
+  focus?: string | null;
   model: string | null;
   usage: WorkoutAnalysisResponse["usage"];
 }
@@ -99,6 +101,8 @@ export async function analyzeWorkoutStream(
   return {
     answer: donePayload.answer,
     data_summary: donePayload.data_summary,
+    question_type: donePayload.question_type,
+    focus: donePayload.focus ?? null,
     model: donePayload.model,
     usage: donePayload.usage,
   };

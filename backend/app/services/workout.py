@@ -259,6 +259,8 @@ class WorkoutService:
                     deload_weeks_detected=0,
                     insufficient_data=True,
                 ).model_dump(),
+                "question_type": "GENERAL",
+                "focus": None,
                 "model": None,
                 "usage": None,
             }
@@ -313,6 +315,8 @@ class WorkoutService:
             "type": "done",
             "answer": answer,
             "data_summary": data_summary.model_dump(),
+            "question_type": question_type,
+            "focus": focus,
             "model": self._providers.generation_model,
             "usage": None,
         }
