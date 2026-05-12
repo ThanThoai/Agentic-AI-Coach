@@ -100,6 +100,32 @@ class BaseLLMProvider(ABC):
     ) -> list[list[float]]:
         """Return embedding vectors for a list of texts."""
 
+    async def complete_json(
+        self,
+        messages: list[LLMMessage],
+        *,
+        model: str | None = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.7,
+        system: str | None = None,
+    ) -> LLMResponse:
+        """Completion that requests a JSON-only response.
+
+        Providers with native JSON mode (OpenAI, Gemini, OpenRouter) override this
+        to use their structured-output API, which guarantees a parseable JSON string
+        with no markdown fences or preamble.
+
+        The default implementation delegates to ``complete()``; the caller is
+        responsible for extracting JSON from the raw text (e.g. via regex).
+        """
+        return await self.complete(
+            messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system,
+        )
+
     async def complete_with_tools(
         self,
         messages: list[dict],

@@ -64,6 +64,40 @@ class GeminiProvider(BaseLLMProvider):
             ),
         )
 
+    async def complete_json(
+        self,
+        messages: list[LLMMessage],
+        *,
+        model: str | None = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.7,
+        system: str | None = None,
+    ) -> LLMResponse:
+        sys_instruction = self._get_system(messages, system)
+        gen_model = genai.GenerativeModel(
+            model_name=model or self._default_model,
+            system_instruction=sys_instruction,
+            generation_config=genai.GenerationConfig(
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+                response_mime_type="application/json",
+            ),
+        )
+        history, last_turn = self._build_history(messages)
+        chat = gen_model.start_chat(history=history)
+        resp = await chat.send_message_async(last_turn)
+        usage = resp.usage_metadata
+        return LLMResponse(
+            content=resp.text,
+            model=model or self._default_model,
+            provider=self.provider_name,
+            usage=TokenUsage(
+                prompt_tokens=usage.prompt_token_count if usage else 0,
+                completion_tokens=usage.candidates_token_count if usage else 0,
+                total_tokens=usage.total_token_count if usage else 0,
+            ),
+        )
+
     async def stream(
         self,
         messages: list[LLMMessage],
