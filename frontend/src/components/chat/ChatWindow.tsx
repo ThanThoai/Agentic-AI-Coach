@@ -272,6 +272,7 @@ export function ChatWindow() {
 
   function handleUserSelect(user: DemoUser) {
     setActiveUser(user);
+    setMessages([]);
     if (user.role !== "coach" && activeMode === "agent") setActiveMode("question");
   }
 
