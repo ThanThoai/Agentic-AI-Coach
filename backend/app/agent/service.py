@@ -76,6 +76,30 @@ class AgentService:
             timeout=self._tool_timeout,
         )
 
+    async def _run_with_keepalive(
+        self,
+        coro,
+        timeout: float,
+        ping_interval: float = 5.0,
+    ):
+        """Run *coro* and yield {"type":"ping"} every *ping_interval* seconds.
+
+        Raises TimeoutError if *coro* does not complete within *timeout*.
+        Designed to be used with 'async for' in run_stream so SSE connections
+        don't time out during long-running LLM or tool calls.
+        """
+        task = asyncio.create_task(asyncio.wait_for(coro, timeout=timeout))
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=ping_interval)
+                if done:
+                    break
+                yield {"type": "ping"}
+            yield task.result()
+        except (TimeoutError, asyncio.CancelledError):
+            task.cancel()
+            raise TimeoutError from None
+
     async def run(self, question: str, user_id: uuid.UUID) -> dict[str, Any]:
         """Run the agent loop and return a dict with answer, tools_used, usage."""
         messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
@@ -162,8 +186,24 @@ class AgentService:
         total_usage = TokenUsage()
 
         for iteration in range(self._max_iterations):
+            # ── LLM call (with keepalive so SSE stays alive) ──────────────────
+            response: AgentLLMResponse | None = None
             try:
-                response: AgentLLMResponse = await self._llm_call(messages)
+                async for _event in self._run_with_keepalive(
+                    self._provider.complete_with_tools(
+                        messages=messages,
+                        tools=TOOL_SCHEMAS,
+                        model=self._model,
+                        max_tokens=1024,
+                        temperature=0.3,
+                        system=COACH_AGENT_SYSTEM,
+                    ),
+                    timeout=self._llm_timeout,
+                ):
+                    if isinstance(_event, dict):
+                        yield _event          # forward ping to client
+                    else:
+                        response = _event     # AgentLLMResponse result
             except TimeoutError:
                 log.error(
                     "agent.llm.timeout",
@@ -177,6 +217,7 @@ class AgentService:
                 }
                 return
 
+            assert response is not None
             total_usage += response.usage
             messages.append(
                 {"role": "assistant", "content": _assistant_turn_raw(response.content_blocks)}
@@ -214,18 +255,18 @@ class AgentService:
 
                 yield {"type": "status", "tools": tool_names}
 
-                # Run tools while sending keepalive pings every 5s so the SSE
-                # connection does not time out during long tool execution.
-                task = asyncio.create_task(self._tool_call(tool_calls))
+                # ── Tool execution (with keepalive) ───────────────────────────
+                results: list[tuple[str, str]] | None = None
                 try:
-                    while True:
-                        done, _ = await asyncio.wait({task}, timeout=5.0)
-                        if done:
-                            break
-                        yield {"type": "ping"}
-                    results = task.result()
+                    async for _event in self._run_with_keepalive(
+                        execute_tools(tool_calls),
+                        timeout=self._tool_timeout,
+                    ):
+                        if isinstance(_event, dict):
+                            yield _event      # forward ping to client
+                        else:
+                            results = _event  # list[tuple[str, str]]
                 except TimeoutError:
-                    task.cancel()
                     log.error(
                         "agent.tools.timeout",
                         tools=tool_names,
@@ -237,6 +278,8 @@ class AgentService:
                         "message": "A tool took too long to respond. Please try again.",
                     }
                     return
+
+                assert results is not None
                 tools_used.extend(name for name, _ in results)
 
                 messages.append(
