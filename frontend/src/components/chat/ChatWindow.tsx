@@ -140,6 +140,8 @@ export function ChatWindow() {
 
   async function send(text: string, mode: CommandMode) {
     if (loading) return;
+    // Snapshot activeUser at call time — guards against state changing mid-await.
+    const user = activeUser;
     setLoading(true);
 
     const userMsg: Message = { id: crypto.randomUUID(), role: "user", content: text, commandMode: mode };
@@ -152,6 +154,7 @@ export function ChatWindow() {
       content: "",
       isLoading: true,
       commandMode: mode,
+      dataOwner: mode === "analysis" && user ? { key: user.key, name: user.name } : undefined,
       pipelineSteps: initialSteps(labels),
     };
 
@@ -160,8 +163,8 @@ export function ChatWindow() {
 
     try {
       if (mode === "analysis") {
-        if (!activeUser) throw new WorkoutError(401, "No user selected");
-        const response = await analyzeWorkout(text, activeUser.access_token);
+        if (!user) throw new WorkoutError(401, "No user selected");
+        const response = await analyzeWorkout(text, user.access_token);
         timersRef.current.forEach(clearTimeout);
         updateMessage(assistantId, {
           content: response.answer,
